@@ -173,3 +173,19 @@ td.hint { text-align: center; padding: 24px; }
   .person-card .btn.big { width: 100%; }
   .seg { margin-left: 0; }
 }
+
+/* Account area, login errors */
+.acct { display: flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 600; }
+a.tab { text-decoration: none; }
+.form-error { background: var(--out-bg); color: var(--out); border-radius: 8px; padding: 10px 12px; font-size: 14px; margin-bottom: 12px; }
+
+/* Kiosk (public IN/OUT screen) */
+.kiosk { max-width: 760px; margin: 0 auto; padding: 32px 16px 80px; }
+.kiosk h1 { text-align: center; font-size: 44px; letter-spacing: .06em; margin: 6px 0 22px; }
+.kiosk-clock { text-align: center; color: var(--muted); font-size: 16px; min-height: 22px; }
+.kiosk .search.big { font-size: 26px; padding: 20px 22px; }
+.kiosk-results { display: grid; gap: 12px; margin-top: 20px; }
+.kiosk .person-name { font-size: 24px; }
+.kiosk .btn.big { font-size: 24px; padding: 20px 28px; min-width: 150px; }
+@media (max-width: 800px) { .kiosk .person-card .btn.big { width: auto; } }
+.gate-card h2 { margin-bottom: 14px; }

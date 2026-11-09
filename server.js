@@ -6,8 +6,9 @@
  * Zero-dependency backend: Node.js built-in HTTP server + node:sqlite.
  *
  * Run:
- *   ADMIN_TOKEN=your-secret-token node server.js
- *   (defaults: PORT=3000, ADMIN_TOKEN=change-me-admin-token)
+ *   ADMIN_USER=you ADMIN_PASSWORD='a-long-passphrase' node server.js
+ *   (first start only creates that admin; if ADMIN_PASSWORD is unset a random
+ *    one is generated and printed once. defaults: PORT=3000, ADMIN_USER=admin)
  */
 
 const http = require('node:http');
@@ -17,7 +18,9 @@ const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 
 const PORT = Number(process.env.PORT || 3000);
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'change-me-admin-token';
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const TRUST_PROXY = process.env.TRUST_PROXY === '1';
+const COOKIE_SECURE = process.env.COOKIE_SECURE === '1';
 const HOST = process.env.HOST || '0.0.0.0';
 
 const DATA_DIR = path.join(__dirname, 'data');
@@ -59,6 +62,21 @@ CREATE TABLE IF NOT EXISTS clock_events (
   direction  TEXT NOT NULL CHECK (direction IN ('in','out')),
   clocked_at INTEGER NOT NULL,
   notes      TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS admin_users (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  password_hash TEXT NOT NULL,
+  created_at    INTEGER NOT NULL,
+  last_login    INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  token_hash TEXT PRIMARY KEY,
+  user_id    INTEGER NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_people_tenant ON people(tenant_id);
@@ -149,25 +167,116 @@ function readBody(req) {
   });
 }
 
-function tokenMatches(candidate) {
-  if (typeof candidate !== 'string') return false;
-  const a = crypto.createHash('sha256').update(candidate).digest();
-  const b = crypto.createHash('sha256').update(ADMIN_TOKEN).digest();
-  return crypto.timingSafeEqual(a, b);
+// ---------------------------------------------------------------------------
+// Auth: admin accounts (scrypt) + server-side sessions (HttpOnly cookie)
+// ---------------------------------------------------------------------------
+
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16);
+  const hash = crypto.scryptSync(password, salt, 64);
+  return `scrypt$${salt.toString('hex')}$${hash.toString('hex')}`;
 }
 
-function isAdmin(req) {
-  const auth = req.headers['authorization'] || '';
-  if (auth.startsWith('Bearer ')) return tokenMatches(auth.slice(7));
-  return tokenMatches(req.headers['x-admin-token']);
+function verifyPassword(password, stored) {
+  const [alg, saltHex, hashHex] = String(stored).split('$');
+  if (alg !== 'scrypt' || !saltHex || !hashHex) return false;
+  const expected = Buffer.from(hashHex, 'hex');
+  const actual = crypto.scryptSync(password, Buffer.from(saltHex, 'hex'), expected.length);
+  return crypto.timingSafeEqual(actual, expected);
+}
+
+const DUMMY_HASH = hashPassword('not-a-real-password'); // equalise timing for unknown users
+
+function sha256(v) { return crypto.createHash('sha256').update(v).digest('hex'); }
+
+function bootstrapAdmin() {
+  const { c } = db.prepare('SELECT COUNT(*) AS c FROM admin_users').get();
+  if (c > 0) return;
+  const username = process.env.ADMIN_USER || 'admin';
+  let password = process.env.ADMIN_PASSWORD;
+  let generated = false;
+  if (!password) { password = crypto.randomBytes(12).toString('base64url'); generated = true; }
+  db.prepare('INSERT INTO admin_users (username, password_hash, created_at) VALUES (?, ?, ?)')
+    .run(username, hashPassword(password), Date.now());
+  console.log(`Created first admin account "${username}".`);
+  if (generated) console.log(`  Generated password (shown once, change it after login): ${password}`);
+}
+bootstrapAdmin();
+
+function parseCookies(req) {
+  const out = {};
+  for (const part of String(req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+  }
+  return out;
+}
+
+function clientIp(req) {
+  if (TRUST_PROXY) {
+    const xff = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+    if (xff) return xff;
+  }
+  return req.socket.remoteAddress || 'unknown';
+}
+
+function isSecureReq(req) {
+  return COOKIE_SECURE || (TRUST_PROXY && req.headers['x-forwarded-proto'] === 'https');
+}
+
+function sessionCookie(req, value, maxAgeSec) {
+  return `sid=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAgeSec}${isSecureReq(req) ? '; Secure' : ''}`;
+}
+
+// Returns { id, username } for a valid session, else null.
+function currentUser(req) {
+  const sid = parseCookies(req).sid;
+  if (!sid) return null;
+  const row = db.prepare(`
+    SELECT u.id, u.username, s.expires_at
+    FROM sessions s JOIN admin_users u ON u.id = s.user_id
+    WHERE s.token_hash = ?
+  `).get(sha256(sid));
+  if (!row) return null;
+  if (row.expires_at < Date.now()) {
+    db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(sha256(sid));
+    return null;
+  }
+  return { id: row.id, username: row.username };
 }
 
 function requireAdmin(res, req) {
-  if (!isAdmin(req)) {
-    sendJSON(res, 401, { error: 'Unauthorized: admin token required' });
-    return false;
+  const user = currentUser(req);
+  if (!user) {
+    sendJSON(res, 401, { error: 'Login required' });
+    return null;
   }
-  return true;
+  req.user = user;
+  return user;
+}
+
+// Login throttling: 8 failures per IP per 15 minutes.
+const loginFails = new Map();
+function throttled(ip) {
+  const e = loginFails.get(ip);
+  if (!e) return false;
+  if (e.reset < Date.now()) { loginFails.delete(ip); return false; }
+  return e.count >= 8;
+}
+function noteFailure(ip) {
+  const e = loginFails.get(ip);
+  if (!e || e.reset < Date.now()) loginFails.set(ip, { count: 1, reset: Date.now() + 15 * 60 * 1000 });
+  else e.count++;
+}
+setInterval(() => {
+  db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(Date.now());
+}, 60 * 60 * 1000).unref();
+
+// Cookie auth needs a CSRF guard on state-changing requests.
+function sameOrigin(req) {
+  const origin = req.headers.origin;
+  if (!origin) return true; // non-browser clients / same-origin GET navigations
+  try { return new URL(origin).host === req.headers.host; } catch { return false; }
 }
 
 function serveStatic(res, urlPath) {
@@ -175,6 +284,8 @@ function serveStatic(res, urlPath) {
   let filePath = null;
   if (urlPath === '/' || urlPath === '') {
     filePath = path.join(PUBLIC_DIR, 'index.html');
+  } else if (urlPath === '/admin' || urlPath === '/admin/') {
+    filePath = path.join(PUBLIC_DIR, 'admin.html');
   } else if (urlPath.startsWith('/assets/')) {
     filePath = path.join(ASSETS_DIR, path.basename(urlPath));
   } else {
@@ -195,7 +306,12 @@ function serveStatic(res, urlPath) {
       return res.end('Not found');
     }
     const ext = path.extname(resolved).toLowerCase();
-    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+    res.writeHead(200, {
+      'Content-Type': MIME[ext] || 'application/octet-stream',
+      'X-Content-Type-Options': 'nosniff',
+      'X-Frame-Options': 'DENY',
+      'Cache-Control': ext === '.html' ? 'no-store' : 'no-cache',
+    });
     res.end(data);
   });
 }
@@ -221,7 +337,7 @@ function latestEventPerPerson() {
   `).all();
 }
 
-function buildStatus(search, tenantId) {
+function buildStatus(search, tenantId, matchPhone = true) {
   const events = latestEventPerPerson();
   const eventByPerson = new Map();
   for (const e of events) eventByPerson.set(e.person_id, e);
@@ -229,9 +345,14 @@ function buildStatus(search, tenantId) {
   const clauses = ['p.active = 1'];
   const params = [];
   if (search) {
-    clauses.push('(p.name LIKE ? OR p.phone LIKE ? OR t.name LIKE ?)');
     const like = `%${search}%`;
-    params.push(like, like, like);
+    if (matchPhone) {
+      clauses.push('(p.name LIKE ? OR p.phone LIKE ? OR t.name LIKE ?)');
+      params.push(like, like, like);
+    } else {
+      clauses.push('(p.name LIKE ? OR t.name LIKE ?)');
+      params.push(like, like);
+    }
   }
   if (tenantId) {
     clauses.push('p.tenant_id = ?');
@@ -375,7 +496,7 @@ function filtersFrom(url) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   // Normalise /api/<resource>/<numeric id> to /api/<resource>/:id for routing.
-  const idMatch = url.pathname.match(/^\/api\/(tenants|people|events)\/(\d+)$/);
+  const idMatch = url.pathname.match(/^\/api\/(tenants|people|events|admin\/users)\/(\d+)$/);
   const route = idMatch
     ? `${req.method} /api/${idMatch[1]}/:id`
     : `${req.method} ${url.pathname}`;
@@ -387,6 +508,103 @@ const server = http.createServer(async (req, res) => {
       return serveStatic(res, url.pathname);
     }
 
+    // ---- CSRF guard for state-changing requests -----------------------------
+    if (req.method !== 'GET' && !sameOrigin(req)) {
+      return sendJSON(res, 403, { error: 'Cross-origin request blocked' });
+    }
+
+    // ---- Auth --------------------------------------------------------------
+    if (route === 'POST /api/auth/login') {
+      const ip = clientIp(req);
+      if (throttled(ip)) return sendJSON(res, 429, { error: 'Too many attempts. Try again in a few minutes.' });
+      const body = await readBody(req);
+      const username = String(body.username || '').trim();
+      const password = String(body.password || '');
+      const user = db.prepare('SELECT id, username, password_hash FROM admin_users WHERE username = ?').get(username);
+      const ok = verifyPassword(password, user ? user.password_hash : DUMMY_HASH) && !!user;
+      if (!ok) { noteFailure(ip); return sendJSON(res, 401, { error: 'Invalid username or password' }); }
+      loginFails.delete(ip);
+      const token = crypto.randomBytes(32).toString('base64url');
+      const now = nowMs();
+      db.prepare('INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)')
+        .run(sha256(token), user.id, now, now + SESSION_TTL_MS);
+      db.prepare('UPDATE admin_users SET last_login = ? WHERE id = ?').run(now, user.id);
+      res.setHeader('Set-Cookie', sessionCookie(req, token, SESSION_TTL_MS / 1000));
+      return sendJSON(res, 200, { username: user.username });
+    }
+
+    if (route === 'POST /api/auth/logout') {
+      const sid = parseCookies(req).sid;
+      if (sid) db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(sha256(sid));
+      res.setHeader('Set-Cookie', sessionCookie(req, '', 0));
+      return sendJSON(res, 200, { ok: true });
+    }
+
+    if (route === 'GET /api/auth/me') {
+      const user = currentUser(req);
+      if (!user) return sendJSON(res, 401, { error: 'Login required' });
+      return sendJSON(res, 200, { username: user.username });
+    }
+
+    if (route === 'POST /api/auth/password') {
+      const user = requireAdmin(res, req); if (!user) return;
+      const body = await readBody(req);
+      const row = db.prepare('SELECT password_hash FROM admin_users WHERE id = ?').get(user.id);
+      if (!verifyPassword(String(body.current || ''), row.password_hash)) {
+        return sendJSON(res, 400, { error: 'Current password is incorrect' });
+      }
+      const next = String(body.next || '');
+      if (next.length < 10) return sendJSON(res, 400, { error: 'New password must be at least 10 characters' });
+      db.prepare('UPDATE admin_users SET password_hash = ? WHERE id = ?').run(hashPassword(next), user.id);
+      // Sign out every other session for this account.
+      const sid = parseCookies(req).sid;
+      db.prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?').run(user.id, sha256(sid));
+      return sendJSON(res, 200, { ok: true });
+    }
+
+    // ---- Admin accounts ----------------------------------------------------
+    if (route === 'GET /api/admin/users') {
+      if (!requireAdmin(res, req)) return;
+      return sendJSON(res, 200, db.prepare(
+        'SELECT id, username, created_at, last_login FROM admin_users ORDER BY username COLLATE NOCASE').all());
+    }
+
+    if (route === 'POST /api/admin/users') {
+      if (!requireAdmin(res, req)) return;
+      const body = await readBody(req);
+      const username = String(body.username || '').trim();
+      const password = String(body.password || '');
+      if (!/^[A-Za-z0-9._@-]{3,40}$/.test(username)) {
+        return sendJSON(res, 400, { error: 'Username must be 3-40 characters (letters, numbers, . _ @ -)' });
+      }
+      if (password.length < 10) return sendJSON(res, 400, { error: 'Password must be at least 10 characters' });
+      if (db.prepare('SELECT id FROM admin_users WHERE username = ?').get(username)) {
+        return sendJSON(res, 409, { error: 'That username already exists' });
+      }
+      const id = Number(db.prepare('INSERT INTO admin_users (username, password_hash, created_at) VALUES (?, ?, ?)')
+        .run(username, hashPassword(password), nowMs()).lastInsertRowid);
+      return sendJSON(res, 201, { id, username });
+    }
+
+    if (route === 'DELETE /api/admin/users/:id') {
+      const user = requireAdmin(res, req); if (!user) return;
+      if (routeId === user.id) return sendJSON(res, 400, { error: "You can't delete your own account" });
+      const { c } = db.prepare('SELECT COUNT(*) AS c FROM admin_users').get();
+      if (c <= 1) return sendJSON(res, 400, { error: 'At least one admin must remain' });
+      db.prepare('DELETE FROM admin_users WHERE id = ?').run(routeId);
+      return sendJSON(res, 200, { ok: true });
+    }
+
+    // ---- Public kiosk: search by name, then IN/OUT -------------------------
+    if (route === 'GET /api/kiosk/search') {
+      const q = (url.searchParams.get('q') || '').trim();
+      if (!q) return sendJSON(res, 200, []);
+      const rows = buildStatus(q.slice(0, 60), null, false).slice(0, 25).map((p) => ({
+        id: p.id, name: p.name, tenant_name: p.tenant_name, status: p.status, clocked_at: p.clocked_at,
+      }));
+      return sendJSON(res, 200, rows);
+    }
+
     // ---- Health ------------------------------------------------------------
     if (route === 'GET /api/health') {
       return sendJSON(res, 200, { ok: true, time: nowMs() });
@@ -394,6 +612,7 @@ const server = http.createServer(async (req, res) => {
 
     // ---- Tenants -----------------------------------------------------------
     if (route === 'GET /api/tenants') {
+      if (!requireAdmin(res, req)) return;
       const rows = db.prepare(
         'SELECT id, name, notes, created_at FROM tenants ORDER BY name COLLATE NOCASE'
       ).all();
@@ -429,6 +648,7 @@ const server = http.createServer(async (req, res) => {
 
     // ---- People ------------------------------------------------------------
     if (route === 'GET /api/people') {
+      if (!requireAdmin(res, req)) return;
       const search = url.searchParams.get('search') || '';
       const tenantId = url.searchParams.get('tenant_id') || null;
       const clauses = ['1=1'];
@@ -504,15 +724,22 @@ const server = http.createServer(async (req, res) => {
       ).get(personId);
       if (!person) return sendJSON(res, 404, { error: 'person not found or inactive' });
 
+      const last = db.prepare(
+        'SELECT direction FROM clock_events WHERE person_id = ? ORDER BY clocked_at DESC, id DESC LIMIT 1'
+      ).get(personId);
+      if (last && last.direction === direction) {
+        return sendJSON(res, 409, { error: `Already clocked ${direction.toUpperCase()}` });
+      }
       const id = Number(
         db.prepare(
           'INSERT INTO clock_events (person_id, tenant_id, direction, clocked_at, notes) VALUES (?, ?, ?, ?, ?)'
-        ).run(personId, person.tenant_id, direction, nowMs(), String(body.notes || '')).lastInsertRowid
+        ).run(personId, person.tenant_id, direction, nowMs(), '').lastInsertRowid
       );
       return sendJSON(res, 201, { id, person_id: personId, direction, clocked_at: nowMs() });
     }
 
     if (route === 'GET /api/status') {
+      if (!requireAdmin(res, req)) return;
       const search = url.searchParams.get('search') || '';
       const tenantId = url.searchParams.get('tenant_id') || null;
       const result = buildStatus(search, tenantId ? Number(tenantId) : null);
@@ -643,5 +870,5 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`IN/OUT Board server listening on http://${HOST}:${PORT}`);
-  console.log(`Admin token: ${ADMIN_TOKEN === 'change-me-admin-token' ? 'change-me-admin-token (default — set ADMIN_TOKEN in production)' : '(set from env)'}`);
+  console.log('Kiosk: /   Admin console: /admin');
 });

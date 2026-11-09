@@ -4,16 +4,12 @@
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-let adminToken = '';
-try { adminToken = localStorage.getItem('inout_admin_token') || ''; } catch { /* storage blocked */ }
-
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
 function api(path, opts = {}) {
   const headers = { 'Content-Type': 'application/json' };
-  if (opts.admin && adminToken) headers['x-admin-token'] = adminToken;
-  return fetch(path, { ...opts, headers: { ...headers, ...(opts.headers || {}) } });
+  return fetch(path, { ...opts, credentials: 'same-origin', headers: { ...headers, ...(opts.headers || {}) } });
 }
 
 async function json(res) { try { return await res.json(); } catch { return {}; } }
@@ -111,25 +107,6 @@ function confirmModal(title, message, okLabel = 'Confirm') {
   return openModal(title, [{ name: '_', label: message, type: 'hidden' }], okLabel).then((v) => !!v);
 }
 
-// ---------------------------------------------------------------------------
-// Top-level tabs
-// ---------------------------------------------------------------------------
-
-let statusTimer = null;
-
-$$('.tab').forEach((tab) => {
-  tab.addEventListener('click', () => {
-    $$('.tab').forEach((t) => t.classList.toggle('active', t === tab));
-    $$('.view').forEach((v) => v.classList.remove('active'));
-    $(`#view-${tab.dataset.view}`).classList.add('active');
-    clearInterval(statusTimer);
-    const v = tab.dataset.view;
-    if (v === 'status') { loadStatus(); statusTimer = setInterval(loadStatus, 30000); }
-    if (v === 'admin') loadAdmin();
-    if (v === 'clock') { loadClock(); $('#clockSearch').focus(); }
-  });
-});
-
 function tickClock() {
   $('#headerClock').textContent = new Date().toLocaleString(undefined, {
     weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit',
@@ -139,168 +116,62 @@ setInterval(tickClock, 1000);
 tickClock();
 
 // ---------------------------------------------------------------------------
-// CLOCK VIEW
-// ---------------------------------------------------------------------------
-
-let clockTenant = '';
-const clockNotes = new Map(); // person id -> note text (survives re-render)
-
-async function loadClockChips() {
-  const tenants = await json(await api('/api/tenants'));
-  if (!Array.isArray(tenants)) return;
-  const chips = [{ id: '', name: 'All tenants' }, ...tenants];
-  $('#clockChips').innerHTML = chips.length > 2
-    ? chips.map((t) => `<button class="chip ${String(t.id) === clockTenant ? 'active' : ''}" data-t="${t.id}">${escapeHtml(t.name)}</button>`).join('')
-    : '';
-  $$('#clockChips .chip').forEach((c) => c.addEventListener('click', () => { clockTenant = c.dataset.t; loadClockChips(); loadClock(); }));
-}
-
-async function loadClock() {
-  const qs = new URLSearchParams();
-  const search = $('#clockSearch').value.trim();
-  if (search) qs.set('search', search);
-  if (clockTenant) qs.set('tenant_id', clockTenant);
-  const people = await json(await api(`/api/status?${qs}`));
-  const wrap = $('#clockResults');
-  if (!Array.isArray(people) || !people.length) {
-    wrap.innerHTML = '<p class="hint center">No people found.</p>';
-    return;
-  }
-  wrap.innerHTML = people.map((p) => {
-    const next = p.status === 'in' ? 'out' : 'in';
-    return `
-    <div class="person-card ${p.status}">
-      <div class="person-info">
-        <div class="person-name">${escapeHtml(p.name)}</div>
-        <div class="person-meta">${escapeHtml(p.tenant_name)}${p.phone ? ' · ' + escapeHtml(p.phone) : ''}${p.clocked_at ? ' · since ' + fmtTime(p.clocked_at) : ''}</div>
-      </div>
-      <input class="note-input" data-note="${p.id}" placeholder="Return / comments" value="${escapeHtml(clockNotes.get(p.id) || '')}" maxlength="200" />
-      ${badge(p.status)}
-      <button class="btn big ${next}" data-id="${p.id}" data-name="${escapeHtml(p.name)}" data-dir="${next}">Clock ${next.toUpperCase()}</button>
-    </div>`;
-  }).join('');
-
-  $$('#clockResults [data-note]').forEach((inp) =>
-    inp.addEventListener('input', () => clockNotes.set(Number(inp.dataset.note), inp.value)));
-
-  $$('#clockResults button[data-dir]').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      btn.disabled = true;
-      const id = Number(btn.dataset.id);
-      const res = await api('/api/clock', {
-        method: 'POST',
-        body: JSON.stringify({ person_id: id, direction: btn.dataset.dir, notes: clockNotes.get(id) || '' }),
-      });
-      if (res.ok) {
-        clockNotes.delete(id);
-        toast(`${btn.dataset.name} clocked ${btn.dataset.dir.toUpperCase()}`);
-        loadClock();
-      } else {
-        toast((await json(res)).error || 'Clock failed', true);
-        btn.disabled = false;
-      }
-    });
-  });
-}
-
-$('#clockSearch').addEventListener('input', debounce(loadClock, 200));
-
-// ---------------------------------------------------------------------------
-// STATUS VIEW
-// ---------------------------------------------------------------------------
-
-async function loadStatus() {
-  if (!$('#statusTenant').dataset.loaded) {
-    const tenants = await json(await api('/api/tenants'));
-    $('#statusTenant').innerHTML = '<option value="">All tenants</option>' +
-      tenants.map((t) => `<option value="${t.id}">${escapeHtml(t.name)}</option>`).join('');
-    $('#statusTenant').dataset.loaded = '1';
-  }
-  const qs = new URLSearchParams();
-  const search = $('#statusSearch').value.trim();
-  if (search) qs.set('search', search);
-  if ($('#statusTenant').value) qs.set('tenant_id', $('#statusTenant').value);
-  const people = await json(await api(`/api/status?${qs}`));
-
-  let inCount = 0, outCount = 0;
-  const byTenant = new Map();
-  for (const p of people) {
-    if (p.status === 'in') inCount++; else outCount++;
-    if (!byTenant.has(p.tenant_name)) byTenant.set(p.tenant_name, []);
-    byTenant.get(p.tenant_name).push(p);
-  }
-  $('#statusSummary').innerHTML = `
-    <div class="sum-stat in">IN <b>${inCount}</b></div>
-    <div class="sum-stat out">OUT <b>${outCount}</b></div>
-    <div class="sum-stat">Total <b>${people.length}</b></div>`;
-  $('#statusUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
-
-  const board = $('#statusBoard');
-  if (!people.length) { board.innerHTML = '<p class="hint center">No people found.</p>'; return; }
-  board.innerHTML = [...byTenant.entries()].map(([tenant, rows]) => `
-    <div class="tenant-group">
-      <h3>${escapeHtml(tenant)}</h3>
-      <table>
-        <thead><tr><th>Name</th><th>Phone</th><th>Status</th><th>Last clock</th><th>Return / comments</th></tr></thead>
-        <tbody>${rows.map((p) => `
-          <tr class="row-${p.status}">
-            <td>${escapeHtml(p.name)}</td><td>${escapeHtml(p.phone || '—')}</td>
-            <td>${badge(p.status)}</td><td>${fmtTime(p.clocked_at)}</td><td>${escapeHtml(p.notes || '')}</td>
-          </tr>`).join('')}</tbody>
-      </table>
-    </div>`).join('');
-}
-$('#statusSearch').addEventListener('input', debounce(loadStatus, 200));
-$('#statusTenant').addEventListener('change', loadStatus);
-$('#refreshStatus').addEventListener('click', loadStatus);
-
-// ---------------------------------------------------------------------------
 // ADMIN: gate + navigation
 // ---------------------------------------------------------------------------
 
-function lockAdmin(msg) {
-  adminToken = '';
-  try { localStorage.removeItem('inout_admin_token'); } catch { /* ignore */ }
+let boardTimer = null;
+
+function showLogin(msg) {
   $('#adminGate').hidden = false;
   $('#adminPanel').hidden = true;
-  if (msg) toast(msg, true);
+  $('#acct').hidden = true;
+  clearInterval(boardTimer);
+  const err = $('#loginError');
+  err.hidden = !msg; err.textContent = msg || '';
 }
 
 async function adminFetch(path, opts = {}) {
-  const res = await api(path, { ...opts, admin: true });
-  if (res.status === 401) { lockAdmin('Admin session expired'); throw new Error('unauthorized'); }
+  const res = await api(path, opts);
+  if (res.status === 401) { showLogin('Your session expired. Please sign in again.'); throw new Error('unauthorized'); }
   return res;
 }
 
 async function loadAdmin() {
-  if (!adminToken) return lockAdmin();
-  const check = await api('/api/admin/overview', { admin: true });
-  if (check.status === 401) return lockAdmin();
+  const me = await api('/api/auth/me');
+  if (!me.ok) return showLogin();
+  $('#acctName').textContent = (await json(me)).username;
+  $('#acct').hidden = false;
   $('#adminGate').hidden = true;
   $('#adminPanel').hidden = false;
   showAdminPage(currentAdminPage);
 }
 
-$('#adminGateForm').addEventListener('submit', async (e) => {
+$('#loginForm').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const t = $('#adminToken').value.trim();
-  if (!t) return toast('Enter a token', true);
-  adminToken = t;
-  const check = await api('/api/admin/overview', { admin: true });
-  if (check.status === 401) { adminToken = ''; return toast('Invalid admin token', true); }
-  try { localStorage.setItem('inout_admin_token', t); } catch { /* ignore */ }
-  $('#adminToken').value = '';
+  const res = await api('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ username: $('#loginUser').value, password: $('#loginPass').value }),
+  });
+  if (!res.ok) { $('#loginPass').value = ''; return showLogin((await json(res)).error || 'Sign in failed'); }
+  $('#loginPass').value = '';
+  $('#loginError').hidden = true;
   loadAdmin();
 });
-$('#adminLock').addEventListener('click', () => lockAdmin());
+
+$('#logoutBtn').addEventListener('click', async () => {
+  await api('/api/auth/logout', { method: 'POST' });
+  showLogin();
+});
 
 let currentAdminPage = 'overview';
-const adminLoaders = { overview: loadOverview, tenants: loadTenantCards, people: loadPeople, log: loadLog };
+const adminLoaders = { overview: loadOverview, board: loadBoard, tenants: loadTenantCards, people: loadPeople, log: loadLog, admins: loadAdmins };
 
 function showAdminPage(name) {
   currentAdminPage = name;
   $$('.side-link[data-admin]').forEach((b) => b.classList.toggle('active', b.dataset.admin === name));
   $$('.admin-page').forEach((p) => p.classList.toggle('active', p.id === `admin-${name}`));
+  clearInterval(boardTimer);
+  if (name === 'board') boardTimer = setInterval(() => loadBoard().catch(() => {}), 30000);
   adminLoaders[name]().catch((e) => { if (e.message !== 'unauthorized') toast('Failed to load', true); });
 }
 $$('.side-link[data-admin]').forEach((b) => b.addEventListener('click', () => showAdminPage(b.dataset.admin)));
@@ -589,8 +460,85 @@ $('#manualEntryBtn').addEventListener('click', async () => {
 });
 
 // ---------------------------------------------------------------------------
+// ADMIN: live board (full detail, auto-refresh)
+// ---------------------------------------------------------------------------
+
+async function loadBoard() {
+  await refreshTenantsCache();
+  const sel = $('#boardTenant');
+  if (!sel.dataset.filled || sel.options.length !== tenantsCache.length + 1) {
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">All tenants</option>' + tenantsCache.map((t) => `<option value="${t.id}">${escapeHtml(t.name)}</option>`).join('');
+    sel.value = cur; sel.dataset.filled = '1';
+  }
+  const qs = new URLSearchParams();
+  if ($('#boardSearch').value.trim()) qs.set('search', $('#boardSearch').value.trim());
+  if (sel.value) qs.set('tenant_id', sel.value);
+  const people = await json(await adminFetch(`/api/status?${qs}`));
+  let inCount = 0;
+  const byTenant = new Map();
+  for (const p of people) {
+    if (p.status === 'in') inCount++;
+    if (!byTenant.has(p.tenant_name)) byTenant.set(p.tenant_name, []);
+    byTenant.get(p.tenant_name).push(p);
+  }
+  $('#boardSummary').innerHTML = `
+    <div class="sum-stat in">IN <b>${inCount}</b></div>
+    <div class="sum-stat out">OUT <b>${people.length - inCount}</b></div>
+    <div class="sum-stat">Total <b>${people.length}</b></div>`;
+  $('#boardUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) + ' · auto-refreshes';
+  $('#boardBody').innerHTML = people.length ? [...byTenant.entries()].map(([tenant, rows]) => `
+    <div class="tenant-group"><h3>${escapeHtml(tenant)}</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Name</th><th>Phone</th><th>Status</th><th>Last clock</th><th>Notes</th></tr></thead>
+        <tbody>${rows.map((p) => `<tr><td><b>${escapeHtml(p.name)}</b></td><td>${escapeHtml(p.phone || '—')}</td>
+          <td>${badge(p.status)}</td><td>${fmtTime(p.clocked_at)}</td><td>${escapeHtml(p.notes || '')}</td></tr>`).join('')}</tbody>
+      </table></div></div>`).join('') : '<p class="hint center">No people found.</p>';
+}
+$('#boardSearch').addEventListener('input', debounce(() => loadBoard().catch(() => {}), 200));
+$('#boardTenant').addEventListener('change', () => loadBoard().catch(() => {}));
+$('#refreshBoard').addEventListener('click', () => loadBoard().catch(() => {}));
+
+// ---------------------------------------------------------------------------
+// ADMIN: admin accounts
+// ---------------------------------------------------------------------------
+
+async function loadAdmins() {
+  const users = await json(await adminFetch('/api/admin/users'));
+  const me = $('#acctName').textContent;
+  $('#adminsBody').innerHTML = users.map((u) => `
+    <tr><td><b>${escapeHtml(u.username)}</b>${u.username === me ? ' <span class="badge none">you</span>' : ''}</td>
+    <td>${fmtTime(u.created_at)}</td><td>${fmtTime(u.last_login)}</td>
+    <td class="actions">${u.username === me ? '' : `<button class="icon-btn danger" data-del-admin="${u.id}" data-name="${escapeHtml(u.username)}" title="Remove">✕</button>`}</td></tr>`).join('');
+  $$('[data-del-admin]').forEach((b) => b.addEventListener('click', async () => {
+    if (!await confirmModal('Remove admin', `Remove admin account "${b.dataset.name}"? They will be signed out.`, 'Remove')) return;
+    const res = await adminFetch(`/api/admin/users/${b.dataset.delAdmin}`, { method: 'DELETE' });
+    if (res.ok) { toast('Admin removed'); loadAdmins(); } else toast((await json(res)).error || 'Failed', true);
+  }));
+}
+
+$('#addAdminBtn').addEventListener('click', async () => {
+  const v = await openModal('Add admin', [
+    { name: 'username', label: 'Username', required: true },
+    { name: 'password', label: 'Password (min 10 characters)', type: 'password', required: true },
+  ], 'Add admin');
+  if (!v) return;
+  const res = await adminFetch('/api/admin/users', { method: 'POST', body: JSON.stringify(v) });
+  if (res.ok) { toast('Admin added'); loadAdmins(); } else toast((await json(res)).error || 'Failed', true);
+});
+
+$('#changePwBtn').addEventListener('click', async () => {
+  const v = await openModal('Change my password', [
+    { name: 'current', label: 'Current password', type: 'password', required: true },
+    { name: 'next', label: 'New password (min 10 characters)', type: 'password', required: true },
+  ], 'Change password');
+  if (!v) return;
+  const res = await adminFetch('/api/auth/password', { method: 'POST', body: JSON.stringify(v) });
+  if (res.ok) toast('Password changed'); else toast((await json(res)).error || 'Failed', true);
+});
+
+// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 
-loadClockChips();
-loadClock();
+loadAdmin();

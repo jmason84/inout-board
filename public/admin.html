@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IN/OUT Board — Admin</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-dot"></span><h1>IN/OUT Board</h1></div>
+    <nav class="tabs"><a class="tab" href="/" target="_blank" rel="noopener">Open kiosk ↗</a></nav>
+    <div class="clock" id="headerClock"></div>
+    <div class="acct" id="acct" hidden><span id="acctName"></span><button class="btn" id="logoutBtn">Sign out</button></div>
+  </header>
+
+  <main>
+    <!-- ADMIN VIEW -->
+    <section id="view-admin" class="view active">
+      <div class="admin-gate" id="adminGate">
+        <div class="card gate-card">
+          <h2>Admin sign in</h2>
+          <form id="loginForm">
+            <label class="field"><span>Username</span><input id="loginUser" class="search" autocomplete="username" required /></label>
+            <label class="field"><span>Password</span><input id="loginPass" type="password" class="search" autocomplete="current-password" required /></label>
+            <div class="form-error" id="loginError" hidden></div>
+            <button type="submit" class="btn primary block">Sign in</button>
+          </form>
+        </div>
+      </div>
+
+      <div class="admin-shell" id="adminPanel" hidden>
+        <aside class="sidebar">
+          <button class="side-link active" data-admin="overview">Overview</button>
+          <button class="side-link" data-admin="board">Live Board</button>
+          <button class="side-link" data-admin="tenants">Tenants</button>
+          <button class="side-link" data-admin="people">People</button>
+          <button class="side-link" data-admin="log">Time Log</button>
+          <button class="side-link" data-admin="admins">Admins</button>
+        </aside>
+
+        <div class="admin-content">
+          <!-- Overview -->
+          <div class="admin-page active" id="admin-overview">
+            <div class="page-head"><h2>Overview</h2><button class="btn" id="refreshOverview">Refresh</button></div>
+            <div class="stat-grid" id="overviewStats"></div>
+            <div class="card">
+              <div class="card-head"><h3>Tenants at a glance</h3></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>Tenant</th><th>People</th><th>IN</th><th>OUT</th><th>Time today</th></tr></thead>
+                <tbody id="overviewTenants"></tbody>
+              </table></div>
+            </div>
+            <div class="card">
+              <div class="card-head"><h3>Recent activity</h3></div>
+              <div id="overviewRecent" class="feed"></div>
+            </div>
+            <div class="card danger-zone">
+              <div class="card-head"><h3>End of day</h3></div>
+              <p class="hint">Clock out everyone who is still IN. Each gets an "End-of-day reset" OUT event.</p>
+              <button class="btn danger" id="resetAll">Clock everyone OUT</button>
+            </div>
+          </div>
+
+          <!-- Live board -->
+          <div class="admin-page" id="admin-board">
+            <div class="page-head"><h2>Live Board</h2><span class="mini" id="boardUpdated"></span></div>
+            <div class="toolbar">
+              <input type="search" id="boardSearch" class="search" placeholder="Filter by name, phone or tenant…" />
+              <select id="boardTenant" class="select"><option value="">All tenants</option></select>
+              <button class="btn" id="refreshBoard">Refresh</button>
+            </div>
+            <div class="summary" id="boardSummary"></div>
+            <div id="boardBody" class="status-board"></div>
+          </div>
+
+          <!-- Admins -->
+          <div class="admin-page" id="admin-admins">
+            <div class="page-head"><h2>Admins</h2>
+              <div class="btn-row"><button class="btn" id="changePwBtn">Change my password</button><button class="btn primary" id="addAdminBtn">+ Add admin</button></div>
+            </div>
+            <div class="card"><div class="table-wrap"><table>
+              <thead><tr><th>Username</th><th>Created</th><th>Last sign-in</th><th></th></tr></thead>
+              <tbody id="adminsBody"></tbody>
+            </table></div></div>
+          </div>
+
+          <!-- Tenants -->
+          <div class="admin-page" id="admin-tenants">
+            <div class="page-head"><h2>Tenants</h2><button class="btn primary" id="addTenantBtn">+ Add tenant</button></div>
+            <div id="tenantCards" class="tenant-grid"></div>
+          </div>
+
+          <!-- People -->
+          <div class="admin-page" id="admin-people">
+            <div class="page-head"><h2>People</h2><button class="btn primary" id="addPersonBtn">+ Add person</button></div>
+            <div class="toolbar">
+              <input type="search" id="peopleSearch" class="search" placeholder="Search people…" />
+              <select id="peopleTenant" class="select"><option value="">All tenants</option></select>
+            </div>
+            <div class="card"><div class="table-wrap"><table>
+              <thead><tr><th>Name</th><th>Tenant</th><th>Phone</th><th>Status</th><th>Active</th><th></th></tr></thead>
+              <tbody id="peopleBody"></tbody>
+            </table></div></div>
+          </div>
+
+          <!-- Time Log -->
+          <div class="admin-page" id="admin-log">
+            <div class="page-head">
+              <h2>Time Log</h2>
+              <div class="btn-row">
+                <button class="btn" id="manualEntryBtn">+ Manual entry</button>
+                <button class="btn" id="exportCsv">Export CSV</button>
+              </div>
+            </div>
+            <div class="card filters">
+              <select id="logRange" class="select">
+                <option value="today">Today</option>
+                <option value="yesterday">Yesterday</option>
+                <option value="week">This week</option>
+                <option value="7d" selected>Last 7 days</option>
+                <option value="month">This month</option>
+                <option value="all">All time</option>
+                <option value="custom">Custom…</option>
+              </select>
+              <input type="date" id="logFrom" class="select" hidden />
+              <input type="date" id="logTo" class="select" hidden />
+              <select id="logTenant" class="select"><option value="">All tenants</option></select>
+              <select id="logPerson" class="select"><option value="">All people</option></select>
+              <div class="seg">
+                <button class="seg-btn active" data-logview="sessions">Shifts</button>
+                <button class="seg-btn" data-logview="events">Raw events</button>
+              </div>
+            </div>
+            <div class="summary" id="logSummary"></div>
+            <div class="card"><div class="table-wrap"><table id="logTable"></table></div></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Generic modal -->
+  <div class="modal-back" id="modalBack" hidden>
+    <div class="modal" role="dialog" aria-modal="true">
+      <h3 id="modalTitle"></h3>
+      <form id="modalForm"><div id="modalFields"></div>
+        <div class="modal-actions">
+          <button type="button" class="btn" id="modalCancel">Cancel</button>
+          <button type="submit" class="btn primary" id="modalOk">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="/app.js"></script>
+</body>
+</html>

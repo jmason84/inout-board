@@ -34,7 +34,7 @@ from their own device.
 | Backend | Node.js built-in HTTP server | Zero npm dependencies |
 | Database | SQLite via `node:sqlite` | Requires Node.js **22.5+** |
 | Frontend | Vanilla HTML / CSS / JS | Served by the same process |
-| Auth | Static admin token | `ADMIN_TOKEN` env var |
+| Auth | Admin accounts (scrypt) + server-side sessions | HttpOnly `SameSite=Strict` cookie; public kiosk at `/` |
 
 ### Data model
 
@@ -52,16 +52,23 @@ audit history is never overwritten.
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
 | GET | `/api/health` | Health check | — |
-| GET | `/api/tenants` | List tenants | — |
+| GET | `/api/tenants` | List tenants | Admin |
 | POST | `/api/tenants` | Add tenant | Admin |
 | PUT | `/api/tenants/:id` | Edit tenant | Admin |
 | DELETE | `/api/tenants/:id` | Delete tenant | Admin |
-| GET | `/api/people` | List people (optional `?search=`, `?tenant_id=`) | — |
+| GET | `/api/people` | List people (optional `?search=`, `?tenant_id=`) | Admin |
 | POST | `/api/people` | Add person | Admin |
 | PUT | `/api/people/:id` | Edit person | Admin |
 | DELETE | `/api/people/:id` | Delete person | Admin |
-| POST | `/api/clock` | Clock a person in/out (`person_id`, `direction`) | — |
-| GET | `/api/status` | Current status of everyone (optional `?search=`, `?tenant_id=`) | — |
+| POST | `/api/clock` | Clock a person in/out (`person_id`, `direction`); `409` if already in that state | Public (kiosk) |
+| GET | `/api/kiosk/search?q=` | Kiosk name/tenant search; returns only id, name, tenant, status (no phone numbers); empty query returns nothing | Public (kiosk) |
+| POST | `/api/auth/login` | Sign in (`username`, `password`) → HttpOnly session cookie; throttled to 8 failures / 15 min / IP | Public |
+| POST | `/api/auth/logout` | End the session | Session |
+| GET | `/api/auth/me` | Current admin | Session |
+| POST | `/api/auth/password` | Change own password (`current`, `next`, min 10 chars) | Admin |
+| GET/POST | `/api/admin/users` | List / add admin accounts | Admin |
+| DELETE | `/api/admin/users/:id` | Remove an admin (not yourself, not the last one) | Admin |
+| GET | `/api/status` | Current status of everyone incl. phone & notes (optional `?search=`, `?tenant_id=`) | Admin |
 | GET | `/api/events` | Clock-event history; filters `tenant_id`, `person_id`, `direction`, `from`, `to` (ms), `limit`, `offset`, `paged=1` | Admin |
 | GET | `/api/events.csv` | Same filters, CSV export | Admin |
 | POST | `/api/events` | Manual/corrected entry (`person_id`, `direction`, `clocked_at`, `notes`) | Admin |
@@ -73,16 +80,33 @@ audit history is never overwritten.
 
 ---
 
+## Two front doors
+
+| URL | Who | What |
+|-----|-----|------|
+| `/` | Anyone (kiosk / tablet by the door) | Type your name, tap **IN** or **OUT**. That's all. No phone numbers, no lists, no admin links. |
+| `/admin` | Admins only (login required) | The full console below. |
+
+### Admin accounts & security
+
+- Admins sign in at `/admin` with a **username and password** (scrypt-hashed). Sessions are server-side, stored hashed, last 12 hours and ride in an `HttpOnly`, `SameSite=Strict` cookie.
+- The first admin is created on first start from `ADMIN_USER` / `ADMIN_PASSWORD`. If `ADMIN_PASSWORD` is not set, a random password is generated and printed once in the server log. Further admins are added under **Admins** in the console, where you can also change your password.
+- All tenant, people, status, event and report endpoints require a session. The kiosk can only search names (not phones) and clock IN/OUT.
+- Login is throttled, state-changing requests reject cross-origin `Origin` headers, and the old `ADMIN_TOKEN` is gone.
+- Behind HTTPS (recommended — e.g. a reverse proxy or Cloudflare tunnel) set `COOKIE_SECURE=1`, or `TRUST_PROXY=1` so `X-Forwarded-Proto/For` are honoured.
+
 ## Admin dashboard
 
-The Admin tab is a small dashboard with a sidebar:
+The admin console has a sidebar:
+
+- **Live Board** — everyone grouped by tenant with phone, status, last clock and notes; auto-refreshes every 30 seconds.
+- **Admins** — add/remove admin accounts, change your password.
 
 - **Overview** — people in/out right now, time logged today, a per-tenant table and a live activity feed, plus the end-of-day "clock everyone OUT" action.
 - **Tenants** — a card per tenant with people / in / out / time-today. Add, edit and delete tenants in a dialog; jump straight to a tenant's time log.
 - **People** — searchable, tenant-filterable table with live status. Add, edit, deactivate and delete people.
 - **Time Log** — pick a range (today, this week, last 7 days, month, custom), tenant and person. View **Shifts** (paired IN→OUT with durations; someone still IN shows "so far") or **Raw events**. Export either as CSV. Admins can add a manual entry (e.g. someone forgot to clock out) or delete a bad event.
 
-The clock screen has a search across all tenants, tenant filter chips, a per-person "Return / comments" note saved with the clock event, and a single big IN/OUT button. The status board auto-refreshes every 30 seconds.
 
 ## Getting started
 
@@ -94,15 +118,15 @@ The clock screen has a search across all tenants, tenant filter chips, a per-per
 
 ```bash
 cd inout-board
-ADMIN_TOKEN=change-me-admin-token node server.js
+ADMIN_USER=jordan ADMIN_PASSWORD='a-long-passphrase' node server.js
 ```
 
 Then open <http://localhost:3000>.
 
-- **Clock view** — no token needed; this is the shared kiosk/terminal screen.
-- **Status board** — no token needed; this is the "someone on the other end"
-  read-only view.
-- **Admin** — unlock with the `ADMIN_TOKEN` value.
+- **Kiosk** at `/` — public; search your name, tap IN or OUT.
+- **Admin console** at `/admin` — sign in with the admin account created on
+  first start (`ADMIN_USER` / `ADMIN_PASSWORD`; a random password is printed
+  once if you don't set one).
 
 The SQLite database is created automatically at `data/inout.sqlite` (gitignored)
 and is seeded with a default **"Main Office"** tenant plus the original board
@@ -114,7 +138,10 @@ roster on first run.
 |----------|---------|-------------|
 | `PORT` | `3000` | HTTP port |
 | `HOST` | `0.0.0.0` | Bind address |
-| `ADMIN_TOKEN` | `change-me-admin-token` | Admin auth token (change in production!) |
+| `ADMIN_USER` | `admin` | Username of the first admin (only used when no admins exist) |
+| `ADMIN_PASSWORD` | random, printed once | Password of the first admin |
+| `COOKIE_SECURE` | unset | Set `1` to mark the session cookie `Secure` (use behind HTTPS) |
+| `TRUST_PROXY` | unset | Set `1` behind a reverse proxy to honour `X-Forwarded-For/Proto` |
 
 ---
 
@@ -128,9 +155,11 @@ inout-board/
 ├── assets/
 │   └── board-design.jpg   # Original design reference photo
 ├── public/
-│   ├── index.html      # Single-page app shell
-│   ├── style.css
-│   └── app.js          # Frontend logic (clock, status, admin)
+│   ├── index.html      # Public kiosk (search + IN/OUT)
+│   ├── kiosk.js
+│   ├── admin.html      # Admin console shell (served at /admin)
+│   ├── app.js          # Admin console logic (login, board, tenants, people, log, admins)
+│   └── style.css
 └── data/               # SQLite DB (created at runtime, gitignored)
 ```
 
@@ -142,9 +171,9 @@ The app is intentionally **self-contained and dependency-free** so it can run
 anywhere Node.js runs: a small VPS, a Raspberry Pi on the office network, a
 container, or a PaaS. For production:
 
-1. Set a strong `ADMIN_TOKEN`.
+1. Set a strong `ADMIN_PASSWORD` on first start (then add per-person admins and change it).
 2. Put it behind HTTPS (reverse proxy such as nginx/Caddy, or the PaaS TLS).
-3. Restrict the admin token to trusted staff.
+3. Set `COOKIE_SECURE=1` (and `TRUST_PROXY=1` if behind a proxy). Only give admin accounts to trusted staff.
 
 > Deployment target is TBD — the code is being finalized in this repo first,
 > before selecting where to host it for presentation.
