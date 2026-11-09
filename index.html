@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>IN/OUT Board</title>
+<style>
+  body { font-family: sans-serif; margin: 20px; background-color: #f0f0f0; }
+  .board { width: 80%; margin: 0 auto; background-color: white; border: 1px solid #ccc; padding: 20px; box-shadow: 2px 2px 8px rgba(0,0,0,0.1); }
+  h1 { text-align: center; color: #333; }
+  .date-time { text-align: center; margin-bottom: 20px; color: #666; }
+  .search-container { text-align: center; margin-bottom: 20px; }
+  #searchInput { padding: 8px; width: 50%; border: 1px solid #ddd; border-radius: 4px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+  th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+  th { background-color: #e0e0e0; color: #333; }
+  tr:nth-child(even) { background-color: #f9f9f9; }
+  .in-status { color: green; font-weight: bold; }
+  .out-status { color: red; font-weight: bold; }
+</style>
+</head>
+<body>
+
+<div class="board">
+  <h1>IN/OUT Board</h1>
+  <div class="date-time" id="dateTimeDisplay"></div>
+  <div class="search-container">
+    <input type="text" id="searchInput" onkeyup="filterTable()" placeholder="Search by name...">
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Phone</th>
+        <th>Status</th>
+        <th>Return/Comments</th>
+        <th>Post Time</th>
+      </tr>
+    </thead>
+    <tbody id="inOutTableBody">
+      <!-- Data will be populated here by JavaScript -->
+    </tbody>
+  </table>
+</div>
+
+<script>
+  // Sample data - in a real application, this would come from a backend API
+  const boardData = [
+    { name: "AA Carlyle", phone: "381-3198", status: "IN", comments: "", postTime: "Nov 8 8:26 AM" },
+    { name: "Justin", phone: "381-3198", status: "IN", comments: "", postTime: "Nov 8 8:26 AM" },
+    { name: "Audrea Amstutz", phone: "858-8276", status: "OUT", comments: "", postTime: "Nov 9 9:24 AM" },
+    { name: "CPA Neal Dawn", phone: "343-7700", status: "IN", comments: "", postTime: "Nov 9 7:50 AM" },
+    { name: "CPA Short Amy", phone: "430-4189", status: "OUT", comments: "", postTime: "Nov 9 8:54 AM" },
+    { name: "Candace Raine", phone: "307-429-221", status: "IN", comments: "", postTime: "Nov 9 8:05 AM" },
+    { name: "Cecilia Malsom", phone: "593-6490", status: "IN", comments: "", postTime: "Nov 9 8:26 AM" },
+    { name: "Crystal Hollenbeck", phone: "", status: "OUT", comments: "", postTime: "Nov 9 7:00 AM" },
+    { name: "FBFS LuAnn Hintz", phone: "348-3470", status: "IN", comments: "", postTime: "Nov 9 7:54 AM" },
+    { name: "FBFS Tom Berger", phone: "348-3470", status: "IN", comments: "", postTime: "Nov 9 6:27 AM" },
+    { name: "HW HenzlikDean", phone: "721-9328", status: "OUT", comments: "", postTime: "Nov 9 7:28 AM" },
+  ];
+
+  function updateDateTime() {
+    const now = new Date();
+    const options = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true };
+    document.getElementById('dateTimeDisplay').textContent = now.toLocaleDateString('en-US', options);
+  }
+
+  function populateTable(data) {
+    const tableBody = document.getElementById('inOutTableBody');
+    tableBody.innerHTML = ''; // Clear existing rows
+    data.forEach(item => {
+      const row = tableBody.insertRow();
+      row.insertCell().textContent = item.name;
+      row.insertCell().textContent = item.phone;
+      const statusCell = row.insertCell();
+      statusCell.textContent = item.status;
+      statusCell.className = item.status === "IN" ? "in-status" : "out-status";
+      row.insertCell().textContent = item.comments;
+      row.insertCell().textContent = item.postTime;
+    });
+  }
+
+  function filterTable() {
+    const input = document.getElementById("searchInput");
+    const filter = input.value.toUpperCase();
+    const tableBody = document.getElementById("inOutTableBody");
+    const tr = tableBody.getElementsByTagName("tr");
+
+    for (let i = 0; i < tr.length; i++) {
+      const td = tr[i].getElementsByTagName("td")[0]; // Get the Name column
+      if (td) {
+        const textValue = td.textContent || td.innerText;
+        if (textValue.toUpperCase().indexOf(filter) > -1) {
+          tr[i].style.display = "";
+        } else {
+          tr[i].style.display = "none";
+        }
+      }
+    }
+  }
+
+  // Initial load
+  updateDateTime();
+  populateTable(boardData);
+  setInterval(updateDateTime, 1000); // Update time every second
+</script>
+
+</body>
+</html>
