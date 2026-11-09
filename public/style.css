@@ -1,0 +1,178 @@
+:root {
+  --bg: #f4f5f7;
+  --card: #ffffff;
+  --border: #e1e4e8;
+  --text: #1f2328;
+  --muted: #6a737d;
+  --in: #1a7f37;
+  --out: #cf222e;
+  --accent: #0969da;
+  --shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* Top bar */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 12px 24px;
+  background: var(--card);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.brand { display: flex; align-items: center; gap: 8px; }
+.brand h1 { font-size: 18px; margin: 0; }
+.brand-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--in);
+  box-shadow: 0 0 0 3px rgba(26,127,55,0.2);
+}
+.clock { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; font-size: 14px; }
+
+/* Tabs */
+.tabs { display: flex; gap: 4px; }
+.tab {
+  border: 1px solid transparent;
+  background: transparent;
+  padding: 8px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--muted);
+}
+.tab.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* Views */
+main { max-width: 1100px; margin: 0 auto; padding: 24px; }
+.view { display: none; }
+.view.active { display: block; }
+
+/* Search */
+.search-wrap { margin-bottom: 8px; }
+.search {
+  width: 100%;
+  padding: 14px 16px;
+  font-size: 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+.hint { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+
+/* Cards / people */
+.card-list { display: grid; gap: 8px; }
+.person-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 16px;
+  box-shadow: var(--shadow);
+}
+.person-info { flex: 1; min-width: 0; }
+.person-name { font-weight: 600; }
+.person-meta { color: var(--muted); font-size: 13px; }
+.badge {
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.badge.in { background: #dafbe1; color: var(--in); }
+.badge.out { background: #ffebe9; color: var(--out); }
+.badge.none { background: #eaeef2; color: var(--muted); }
+.badge.tenant { background: #ddf4ff; color: var(--accent); text-transform: none; letter-spacing: 0; }
+
+.btn {
+  border: 1px solid var(--border);
+  background: var(--card);
+  padding: 10px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.btn:hover { background: #f0f3f6; }
+.btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.btn.primary:hover { background: #0969dae6; }
+.btn.danger { background: #fff; color: var(--out); border-color: #ffb3b8; }
+.btn.danger:hover { background: #ffebe9; }
+.btn.in { background: var(--in); color: #fff; border-color: var(--in); }
+.btn.out { background: var(--out); color: #fff; border-color: var(--out); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Status board */
+.toolbar { display: flex; gap: 8px; margin-bottom: 16px; }
+.toolbar .search { flex: 1; }
+.select {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  font-size: 14px;
+}
+.summary { margin-bottom: 16px; display: flex; gap: 16px; flex-wrap: wrap; }
+.sum-stat { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 10px 16px; box-shadow: var(--shadow); }
+.sum-stat b { font-size: 18px; }
+
+.status-board { display: grid; gap: 16px; }
+.tenant-group h3 { margin: 0 0 8px; color: var(--muted); font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; }
+.tenant-group table { width: 100%; border-collapse: collapse; background: var(--card); box-shadow: var(--shadow); border-radius: 10px; overflow: hidden; }
+.tenant-group th, .tenant-group td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); font-size: 14px; }
+.tenant-group th { background: #f6f8fa; color: var(--muted); font-weight: 600; }
+
+/* Admin */
+.admin-gate .card { max-width: 420px; margin: 40px auto; padding: 24px; }
+.admin-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+@media (max-width: 800px) { .admin-grid { grid-template-columns: 1fr; } }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; box-shadow: var(--shadow); margin-bottom: 16px; }
+.card h2 { margin-top: 0; font-size: 16px; }
+.inline-form { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.inline-form .search { width: auto; flex: 1; min-width: 140px; }
+.item-list { display: grid; gap: 6px; margin-bottom: 12px; }
+.item-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 14px; }
+.item-row .grow { flex: 1; }
+.item-row .mini { font-size: 12px; color: var(--muted); }
+.icon-btn { border: none; background: transparent; cursor: pointer; color: var(--muted); font-size: 14px; padding: 4px 8px; border-radius: 6px; }
+.icon-btn:hover { background: #f0f3f6; color: var(--out); }
+
+.table-wrap { overflow-x: auto; }
+.events-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.events-table th, .events-table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); }
+.events-table th { color: var(--muted); background: #f6f8fa; }
+.events-table td.in { color: var(--in); font-weight: 700; }
+.events-table td.out { color: var(--out); font-weight: 700; }
+
+/* Toast */
+.toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #1f2328;
+  color: #fff;
+  padding: 12px 20px;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+  font-size: 14px;
+  z-index: 50;
+}
+.toast.error { background: var(--out); }

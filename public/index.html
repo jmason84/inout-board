@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IN/OUT Board</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-dot"></span>
+      <h1>IN/OUT Board</h1>
+    </div>
+    <nav class="tabs" id="tabs">
+      <button class="tab active" data-view="clock">Clock In/Out</button>
+      <button class="tab" data-view="status">Status Board</button>
+      <button class="tab" data-view="admin">Admin</button>
+    </nav>
+    <div class="clock" id="headerClock"></div>
+  </header>
+
+  <main>
+    <!-- CLOCK VIEW -->
+    <section id="view-clock" class="view active">
+      <div class="search-wrap">
+        <input
+          type="text"
+          id="clockSearch"
+          class="search"
+          placeholder="Search all tenants and people…"
+          autocomplete="off"
+          autofocus
+        />
+      </div>
+      <div class="hint">Search across <em>all</em> tenants. Tap a person to clock them <strong>in</strong> or <strong>out</strong>.</div>
+      <div id="clockResults" class="card-list"></div>
+    </section>
+
+    <!-- STATUS VIEW -->
+    <section id="view-status" class="view">
+      <div class="toolbar">
+        <input type="text" id="statusSearch" class="search" placeholder="Filter status board…" autocomplete="off" />
+        <select id="statusTenant" class="select">
+          <option value="">All tenants</option>
+        </select>
+        <button id="refreshStatus" class="btn">Refresh</button>
+      </div>
+      <div class="summary" id="statusSummary"></div>
+      <div id="statusBoard" class="status-board"></div>
+    </section>
+
+    <!-- ADMIN VIEW -->
+    <section id="view-admin" class="view">
+      <div class="admin-gate" id="adminGate">
+        <div class="card">
+          <h2>Admin access</h2>
+          <p>Enter the admin token configured on the server (<code>ADMIN_TOKEN</code>).</p>
+          <input type="password" id="adminToken" class="search" placeholder="Admin token" />
+          <button id="adminUnlock" class="btn primary">Unlock</button>
+        </div>
+      </div>
+      <div class="admin-panel" id="adminPanel" hidden>
+        <div class="admin-grid">
+          <div class="card">
+            <h2>Tenants</h2>
+            <div id="tenantList" class="item-list"></div>
+            <form id="tenantForm" class="inline-form">
+              <input type="text" id="tenantName" class="search" placeholder="New tenant name" />
+              <input type="text" id="tenantNotes" class="search" placeholder="Notes (optional)" />
+              <button type="submit" class="btn primary">Add tenant</button>
+            </form>
+          </div>
+          <div class="card">
+            <h2>People</h2>
+            <form id="personForm" class="inline-form">
+              <select id="personTenant" class="select"></select>
+              <input type="text" id="personName" class="search" placeholder="Full name" />
+              <input type="text" id="personPhone" class="search" placeholder="Phone (optional)" />
+              <button type="submit" class="btn primary">Add person</button>
+            </form>
+            <div id="personList" class="item-list"></div>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Recent clock events</h2>
+          <button id="refreshEvents" class="btn">Refresh</button>
+          <button id="resetAll" class="btn danger">Clock everyone OUT (end of day)</button>
+          <div class="table-wrap">
+            <table class="events-table">
+              <thead>
+                <tr><th>Time</th><th>Person</th><th>Tenant</th><th>Action</th><th>Notes</th></tr>
+              </thead>
+              <tbody id="eventsBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
