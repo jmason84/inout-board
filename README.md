@@ -62,10 +62,27 @@ audit history is never overwritten.
 | DELETE | `/api/people/:id` | Delete person | Admin |
 | POST | `/api/clock` | Clock a person in/out (`person_id`, `direction`) | — |
 | GET | `/api/status` | Current status of everyone (optional `?search=`, `?tenant_id=`) | — |
-| GET | `/api/events` | Clock-event history (admin) | Admin |
+| GET | `/api/events` | Clock-event history; filters `tenant_id`, `person_id`, `direction`, `from`, `to` (ms), `limit`, `offset`, `paged=1` | Admin |
+| GET | `/api/events.csv` | Same filters, CSV export | Admin |
+| POST | `/api/events` | Manual/corrected entry (`person_id`, `direction`, `clocked_at`, `notes`) | Admin |
+| DELETE | `/api/events/:id` | Remove a clock event | Admin |
+| GET | `/api/sessions` | IN→OUT shifts with durations + total (same filters); open shifts flagged `open` | Admin |
+| GET | `/api/sessions.csv` | Shifts as CSV | Admin |
+| GET | `/api/admin/overview` | Totals, per-tenant roll-up (people / in / out / time today), recent activity | Admin |
 | POST | `/api/reset` | Clock everyone IN → OUT (end of day) | Admin |
 
 ---
+
+## Admin dashboard
+
+The Admin tab is a small dashboard with a sidebar:
+
+- **Overview** — people in/out right now, time logged today, a per-tenant table and a live activity feed, plus the end-of-day "clock everyone OUT" action.
+- **Tenants** — a card per tenant with people / in / out / time-today. Add, edit and delete tenants in a dialog; jump straight to a tenant's time log.
+- **People** — searchable, tenant-filterable table with live status. Add, edit, deactivate and delete people.
+- **Time Log** — pick a range (today, this week, last 7 days, month, custom), tenant and person. View **Shifts** (paired IN→OUT with durations; someone still IN shows "so far") or **Raw events**. Export either as CSV. Admins can add a manual entry (e.g. someone forgot to clock out) or delete a bad event.
+
+The clock screen has a search across all tenants, tenant filter chips, a per-person "Return / comments" note saved with the clock event, and a single big IN/OUT button. The status board auto-refreshes every 30 seconds.
 
 ## Getting started
 

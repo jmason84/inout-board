@@ -13,6 +13,7 @@
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 
 const PORT = Number(process.env.PORT || 3000);
@@ -148,13 +149,17 @@ function readBody(req) {
   });
 }
 
+function tokenMatches(candidate) {
+  if (typeof candidate !== 'string') return false;
+  const a = crypto.createHash('sha256').update(candidate).digest();
+  const b = crypto.createHash('sha256').update(ADMIN_TOKEN).digest();
+  return crypto.timingSafeEqual(a, b);
+}
+
 function isAdmin(req) {
   const auth = req.headers['authorization'] || '';
-  if (auth.startsWith('Bearer ')) {
-    return auth.slice(7) === ADMIN_TOKEN;
-  }
-  const headerToken = req.headers['x-admin-token'];
-  return typeof headerToken === 'string' && headerToken === ADMIN_TOKEN;
+  if (auth.startsWith('Bearer ')) return tokenMatches(auth.slice(7));
+  return tokenMatches(req.headers['x-admin-token']);
 }
 
 function requireAdmin(res, req) {
@@ -256,13 +261,125 @@ function buildStatus(search, tenantId) {
   });
 }
 
+
+// ---------------------------------------------------------------------------
+// Reporting helpers (admin dashboard)
+// ---------------------------------------------------------------------------
+
+function parseRange(url) {
+  const from = Number(url.searchParams.get('from')) || 0;
+  const to = Number(url.searchParams.get('to')) || Number.MAX_SAFE_INTEGER;
+  return { from, to };
+}
+
+function queryEvents({ tenantId, personId, from, to, direction, limit, offset }) {
+  const clauses = ['ce.clocked_at >= ?', 'ce.clocked_at <= ?'];
+  const params = [from, to];
+  if (tenantId) { clauses.push('ce.tenant_id = ?'); params.push(tenantId); }
+  if (personId) { clauses.push('ce.person_id = ?'); params.push(personId); }
+  if (direction) { clauses.push('ce.direction = ?'); params.push(direction); }
+  const where = clauses.join(' AND ');
+  const total = db.prepare(`SELECT COUNT(*) AS c FROM clock_events ce WHERE ${where}`).get(...params).c;
+  const rows = db.prepare(`
+    SELECT ce.id, ce.person_id, ce.tenant_id, ce.direction, ce.clocked_at, ce.notes,
+           p.name AS person_name, t.name AS tenant_name
+    FROM clock_events ce
+    JOIN people p ON p.id = ce.person_id
+    JOIN tenants t ON t.id = ce.tenant_id
+    WHERE ${where}
+    ORDER BY ce.clocked_at DESC, ce.id DESC
+    LIMIT ? OFFSET ?
+  `).all(...params, limit, offset);
+  return { total, rows };
+}
+
+// Pair IN -> OUT events into sessions (shifts) with durations.
+function buildSessions({ tenantId, personId, from, to }) {
+  const clauses = ['ce.clocked_at >= ?', 'ce.clocked_at <= ?'];
+  const params = [from, to];
+  if (tenantId) { clauses.push('ce.tenant_id = ?'); params.push(tenantId); }
+  if (personId) { clauses.push('ce.person_id = ?'); params.push(personId); }
+  const events = db.prepare(`
+    SELECT ce.person_id, ce.tenant_id, ce.direction, ce.clocked_at,
+           p.name AS person_name, t.name AS tenant_name
+    FROM clock_events ce
+    JOIN people p ON p.id = ce.person_id
+    JOIN tenants t ON t.id = ce.tenant_id
+    WHERE ${clauses.join(' AND ')}
+    ORDER BY ce.person_id, ce.clocked_at, ce.id
+  `).all(...params);
+
+  const now = nowMs();
+  const sessions = [];
+  let open = null;
+  let currentPerson = null;
+  const flush = () => {
+    if (open) {
+      open.clock_out = null;
+      open.duration_ms = Math.max(0, now - open.clock_in);
+      open.open = true;
+      sessions.push(open);
+      open = null;
+    }
+  };
+  for (const e of events) {
+    if (e.person_id !== currentPerson) { flush(); currentPerson = e.person_id; }
+    if (e.direction === 'in') {
+      if (open) flush(); // double IN: treat previous as still open/unclosed
+      open = {
+        person_id: e.person_id, person_name: e.person_name,
+        tenant_id: e.tenant_id, tenant_name: e.tenant_name,
+        clock_in: e.clocked_at,
+      };
+    } else if (open) {
+      sessions.push({ ...open, clock_out: e.clocked_at, duration_ms: e.clocked_at - open.clock_in, open: false });
+      open = null;
+    }
+  }
+  flush();
+  sessions.sort((a, b) => b.clock_in - a.clock_in);
+  return sessions;
+}
+
+function csvEscape(v) {
+  const s = String(v ?? '');
+  // Neutralise spreadsheet formula injection.
+  const safe = /^[=+\-@\t\r]/.test(s) ? "'" + s : s;
+  return /[",\n\r]/.test(safe) ? '"' + safe.replace(/"/g, '""') + '"' : safe;
+}
+
+function sendCSV(res, filename, header, rows) {
+  const body = [header, ...rows].map((r) => r.map(csvEscape).join(',')).join('\r\n') + '\r\n';
+  res.writeHead(200, {
+    'Content-Type': 'text/csv; charset=utf-8',
+    'Content-Disposition': `attachment; filename="${filename}"`,
+    'Content-Length': Buffer.byteLength(body),
+  });
+  res.end(body);
+}
+
+function filtersFrom(url) {
+  const { from, to } = parseRange(url);
+  return {
+    tenantId: Number(url.searchParams.get('tenant_id')) || null,
+    personId: Number(url.searchParams.get('person_id')) || null,
+    direction: ['in', 'out'].includes(url.searchParams.get('direction')) ? url.searchParams.get('direction') : null,
+    from, to,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-  const route = `${req.method} ${url.pathname}`;
+  // Normalise /api/<resource>/<numeric id> to /api/<resource>/:id for routing.
+  const idMatch = url.pathname.match(/^\/api\/(tenants|people|events)\/(\d+)$/);
+  const route = idMatch
+    ? `${req.method} /api/${idMatch[1]}/:id`
+    : `${req.method} ${url.pathname}`;
+  const routeId = idMatch ? Number(idMatch[2]) : null;
 
   try {
     // ---- Static files ------------------------------------------------------
@@ -298,12 +415,13 @@ const server = http.createServer(async (req, res) => {
 
     if (route === 'PUT /api/tenants/:id' || route === 'DELETE /api/tenants/:id') {
       if (!requireAdmin(res, req)) return;
-      const id = Number(url.pathname.split('/').pop());
+      const id = routeId;
       if (req.method === 'DELETE') {
         db.prepare('DELETE FROM tenants WHERE id = ?').run(id);
         return sendJSON(res, 200, { ok: true });
       }
       const body = await readBody(req);
+      if (!String(body.name || '').trim()) return sendJSON(res, 400, { error: 'name is required' });
       db.prepare('UPDATE tenants SET name = ?, notes = ? WHERE id = ?')
         .run(String(body.name || '').trim(), String(body.notes || ''), id);
       return sendJSON(res, 200, { ok: true });
@@ -352,12 +470,16 @@ const server = http.createServer(async (req, res) => {
 
     if (route === 'PUT /api/people/:id' || route === 'DELETE /api/people/:id') {
       if (!requireAdmin(res, req)) return;
-      const id = Number(url.pathname.split('/').pop());
+      const id = routeId;
       if (req.method === 'DELETE') {
         db.prepare('DELETE FROM people WHERE id = ?').run(id);
         return sendJSON(res, 200, { ok: true });
       }
       const body = await readBody(req);
+      if (!String(body.name || '').trim()) return sendJSON(res, 400, { error: 'name is required' });
+      if (!db.prepare('SELECT id FROM tenants WHERE id = ?').get(Number(body.tenant_id))) {
+        return sendJSON(res, 400, { error: 'tenant_id does not exist' });
+      }
       db.prepare('UPDATE people SET tenant_id = ?, name = ?, phone = ?, active = ? WHERE id = ?')
         .run(
           Number(body.tenant_id),
@@ -399,24 +521,86 @@ const server = http.createServer(async (req, res) => {
 
     if (route === 'GET /api/events') {
       if (!requireAdmin(res, req)) return;
-      const personId = url.searchParams.get('person_id');
-      const limit = Math.min(Number(url.searchParams.get('limit') || 200), 1000);
-      let sql = `
-        SELECT ce.id, ce.person_id, ce.tenant_id, ce.direction, ce.clocked_at, ce.notes,
-               p.name AS person_name, t.name AS tenant_name
-        FROM clock_events ce
-        JOIN people p ON p.id = ce.person_id
-        JOIN tenants t ON t.id = ce.tenant_id
-      `;
-      const params = [];
-      if (personId) {
-        sql += ' WHERE ce.person_id = ?';
-        params.push(Number(personId));
-      }
-      sql += ' ORDER BY ce.clocked_at DESC LIMIT ?';
-      params.push(limit);
-      const rows = db.prepare(sql).all(...params);
+      const f = filtersFrom(url);
+      const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 200, 1), 1000);
+      const offset = Math.max(Number(url.searchParams.get('offset')) || 0, 0);
+      const { total, rows } = queryEvents({ ...f, limit, offset });
+      // Back-compat: plain array unless paging metadata requested.
+      if (url.searchParams.get('paged') === '1') return sendJSON(res, 200, { total, rows });
       return sendJSON(res, 200, rows);
+    }
+
+    if (route === 'GET /api/events.csv') {
+      if (!requireAdmin(res, req)) return;
+      const { rows } = queryEvents({ ...filtersFrom(url), limit: 100000, offset: 0 });
+      return sendCSV(res, 'clock-events.csv',
+        ['Time', 'Person', 'Tenant', 'Direction', 'Notes'],
+        rows.map((e) => [new Date(e.clocked_at).toISOString(), e.person_name, e.tenant_name, e.direction.toUpperCase(), e.notes]));
+    }
+
+    if (route === 'GET /api/sessions' || route === 'GET /api/sessions.csv') {
+      if (!requireAdmin(res, req)) return;
+      const sessions = buildSessions(filtersFrom(url));
+      if (url.pathname.endsWith('.csv')) {
+        return sendCSV(res, 'time-sessions.csv',
+          ['Person', 'Tenant', 'Clock in', 'Clock out', 'Minutes', 'Still in'],
+          sessions.map((x) => [x.person_name, x.tenant_name, new Date(x.clock_in).toISOString(),
+            x.clock_out ? new Date(x.clock_out).toISOString() : '', Math.round(x.duration_ms / 60000), x.open ? 'yes' : 'no']));
+      }
+      const totalMs = sessions.reduce((a, x) => a + x.duration_ms, 0);
+      return sendJSON(res, 200, { sessions, total_ms: totalMs });
+    }
+
+    // Manual / corrected entry by an admin (e.g. someone forgot to clock out).
+    if (route === 'POST /api/events') {
+      if (!requireAdmin(res, req)) return;
+      const body = await readBody(req);
+      const direction = String(body.direction || '').toLowerCase();
+      const at = Number(body.clocked_at);
+      if (!['in', 'out'].includes(direction)) return sendJSON(res, 400, { error: 'direction must be "in" or "out"' });
+      if (!Number.isFinite(at) || at <= 0) return sendJSON(res, 400, { error: 'clocked_at (ms) is required' });
+      const person = db.prepare('SELECT id, tenant_id FROM people WHERE id = ?').get(Number(body.person_id));
+      if (!person) return sendJSON(res, 404, { error: 'person not found' });
+      const id = Number(db.prepare(
+        'INSERT INTO clock_events (person_id, tenant_id, direction, clocked_at, notes) VALUES (?, ?, ?, ?, ?)'
+      ).run(person.id, person.tenant_id, direction, at, String(body.notes || 'Manual entry (admin)')).lastInsertRowid);
+      return sendJSON(res, 201, { id });
+    }
+
+    if (route === 'DELETE /api/events/:id') {
+      if (!requireAdmin(res, req)) return;
+      db.prepare('DELETE FROM clock_events WHERE id = ?').run(routeId);
+      return sendJSON(res, 200, { ok: true });
+    }
+
+    // Dashboard overview: totals, per-tenant roll-up, and recent activity.
+    if (route === 'GET /api/admin/overview') {
+      if (!requireAdmin(res, req)) return;
+      const status = buildStatus('', null);
+      const startOfDay = Number(url.searchParams.get('day_start')) || new Date().setHours(0, 0, 0, 0);
+      const todaySessions = buildSessions({ from: startOfDay, to: Number.MAX_SAFE_INTEGER, tenantId: null, personId: null });
+      const tenants = db.prepare('SELECT id, name, notes, created_at FROM tenants ORDER BY name COLLATE NOCASE').all();
+      const perTenant = tenants.map((t) => {
+        const ppl = status.filter((p) => p.tenant_id === t.id);
+        return {
+          ...t,
+          people: ppl.length,
+          in_count: ppl.filter((p) => p.status === 'in').length,
+          out_count: ppl.filter((p) => p.status !== 'in').length,
+          today_ms: todaySessions.filter((x) => x.tenant_id === t.id).reduce((a, x) => a + x.duration_ms, 0),
+        };
+      });
+      const recent = queryEvents({ from: 0, to: Number.MAX_SAFE_INTEGER, limit: 10, offset: 0 }).rows;
+      return sendJSON(res, 200, {
+        totals: {
+          tenants: tenants.length,
+          people: status.length,
+          in_now: status.filter((p) => p.status === 'in').length,
+          today_ms: todaySessions.reduce((a, x) => a + x.duration_ms, 0),
+        },
+        tenants: perTenant,
+        recent,
+      });
     }
 
     // ---- Reset all to OUT (admin convenience) ------------------------------
