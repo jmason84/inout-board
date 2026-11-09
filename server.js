@@ -1,9 +1,16 @@
 'use strict';
 
 /**
- * IN/OUT Board — multi-tenant clock in/out system.
+ * IN/OUT Board v2 — multi-tenant clock in/out system.
  *
  * Zero-dependency backend: Node.js built-in HTTP server + node:sqlite.
+ * Improvements over v1:
+ *   - Soft-delete for tenants & people (audit history is never destroyed)
+ *   - Live updates via Server-Sent Events (no manual refresh needed)
+ *   - "Undo" window for accidental taps (delete an event within 60s)
+ *   - CSV export of the clock-event history (admin)
+ *   - Fixed: PUT /api/people tenant_id validation, static path traversal
+ *   - Consistent clocked_at timestamp in responses
  *
  * Run:
  *   ADMIN_TOKEN=your-secret-token node server.js
@@ -18,6 +25,8 @@ const { DatabaseSync } = require('node:sqlite');
 const PORT = Number(process.env.PORT || 3000);
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'change-me-admin-token';
 const HOST = process.env.HOST || '0.0.0.0';
+
+const UNDO_WINDOW_MS = 60_000; // allow "undo" of a clock event for 60 seconds
 
 const DATA_DIR = path.join(__dirname, 'data');
 const DB_PATH = path.join(DATA_DIR, 'inout.sqlite');
@@ -39,6 +48,7 @@ CREATE TABLE IF NOT EXISTS tenants (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   name       TEXT NOT NULL,
   notes      TEXT NOT NULL DEFAULT '',
+  active     INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL
 );
 
@@ -65,13 +75,23 @@ CREATE INDEX IF NOT EXISTS idx_events_person ON clock_events(person_id);
 CREATE INDEX IF NOT EXISTS idx_events_time   ON clock_events(clocked_at);
 `);
 
+// Lightweight migration: older DBs (v1) had no `active` column on tenants.
+function migrate() {
+  const cols = db.prepare('PRAGMA table_info(tenants)').all().map((c) => c.name);
+  if (!cols.includes('active')) {
+    db.exec('ALTER TABLE tenants ADD COLUMN active INTEGER NOT NULL DEFAULT 1');
+    console.log('Migrated: added tenants.active column.');
+  }
+}
+migrate();
+
 // Seed a default tenant + the original board roster (only when empty).
 function seed() {
   const { c } = db.prepare('SELECT COUNT(*) AS c FROM tenants').get();
   if (c > 0) return;
 
   const now = Date.now();
-  const insTenant = db.prepare('INSERT INTO tenants (name, notes, created_at) VALUES (?, ?, ?)');
+  const insTenant = db.prepare('INSERT INTO tenants (name, notes, active, created_at) VALUES (?, ?, 1, ?)');
   const tenantId = Number(insTenant.run('Main Office', 'Default tenant (seeded)', now).lastInsertRowid);
 
   const insPerson = db.prepare(
@@ -150,9 +170,7 @@ function readBody(req) {
 
 function isAdmin(req) {
   const auth = req.headers['authorization'] || '';
-  if (auth.startsWith('Bearer ')) {
-    return auth.slice(7) === ADMIN_TOKEN;
-  }
+  if (auth.startsWith('Bearer ')) return auth.slice(7) === ADMIN_TOKEN;
   const headerToken = req.headers['x-admin-token'];
   return typeof headerToken === 'string' && headerToken === ADMIN_TOKEN;
 }
@@ -165,21 +183,24 @@ function requireAdmin(res, req) {
   return true;
 }
 
+// Static files, hardened against path traversal (prefix + separator check).
 function serveStatic(res, urlPath) {
-  // Only allow serving from public/ and assets/.
-  let filePath = null;
+  let filePath;
+  let root;
   if (urlPath === '/' || urlPath === '') {
     filePath = path.join(PUBLIC_DIR, 'index.html');
+    root = PUBLIC_DIR;
   } else if (urlPath.startsWith('/assets/')) {
     filePath = path.join(ASSETS_DIR, path.basename(urlPath));
+    root = ASSETS_DIR;
   } else {
     filePath = path.join(PUBLIC_DIR, urlPath);
+    root = PUBLIC_DIR;
   }
 
   const resolved = path.resolve(filePath);
-  const pubRoot = path.resolve(PUBLIC_DIR);
-  const assetsRoot = path.resolve(ASSETS_DIR);
-  if (!resolved.startsWith(pubRoot) && !resolved.startsWith(assetsRoot)) {
+  const rootWithSep = root.endsWith(path.sep) ? root : root + path.sep;
+  if (resolved !== root && !resolved.startsWith(rootWithSep)) {
     res.writeHead(403);
     return res.end('Forbidden');
   }
@@ -196,32 +217,58 @@ function serveStatic(res, urlPath) {
 }
 
 // ---------------------------------------------------------------------------
+// Server-Sent Events (live updates)
+// ---------------------------------------------------------------------------
+
+const sseClients = new Set();
+
+function broadcast(type, payload) {
+  const msg = `event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`;
+  for (const res of sseClients) {
+    try { res.write(msg); } catch { /* client gone; cleaned up on close */ }
+  }
+}
+
+function openStream(req, res) {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  res.write('retry: 3000\n\n');
+  sseClients.add(res);
+  const heartbeat = setInterval(() => { try { res.write(':hb\n\n'); } catch { /* noop */ } }, 15000);
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    sseClients.delete(res);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Query helpers
 // ---------------------------------------------------------------------------
 
-function nowMs() {
-  return Date.now();
-}
+function nowMs() { return Date.now(); }
 
 function latestEventPerPerson() {
-  // Returns, for every active person, their most recent clock event (or null).
   return db.prepare(`
     SELECT ce.*
     FROM clock_events ce
     JOIN (
-      SELECT person_id, MAX(clocked_at) AS mx
+      SELECT person_id, MAX(id) AS mx
       FROM clock_events
       GROUP BY person_id
-    ) latest ON latest.person_id = ce.person_id AND latest.mx = ce.clocked_at
+    ) latest ON latest.person_id = ce.person_id AND latest.mx = ce.id
   `).all();
 }
 
-function buildStatus(search, tenantId) {
+function buildStatus(search, tenantId, includeInactive) {
   const events = latestEventPerPerson();
   const eventByPerson = new Map();
   for (const e of events) eventByPerson.set(e.person_id, e);
 
-  const clauses = ['p.active = 1'];
+  const clauses = ['p.active = 1', 't.active = 1'];
   const params = [];
   if (search) {
     clauses.push('(p.name LIKE ? OR p.phone LIKE ? OR t.name LIKE ?)');
@@ -256,6 +303,11 @@ function buildStatus(search, tenantId) {
   });
 }
 
+function csvEscape(v) {
+  const s = String(v ?? '');
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
@@ -265,7 +317,10 @@ const server = http.createServer(async (req, res) => {
   const route = `${req.method} ${url.pathname}`;
 
   try {
-    // ---- Static files ------------------------------------------------------
+    // ---- Static files / stream -------------------------------------------
+    if (req.method === 'GET' && url.pathname === '/api/stream') {
+      return openStream(req, res);
+    }
     if (req.method === 'GET' && !url.pathname.startsWith('/api/')) {
       return serveStatic(res, url.pathname);
     }
@@ -277,8 +332,11 @@ const server = http.createServer(async (req, res) => {
 
     // ---- Tenants -----------------------------------------------------------
     if (route === 'GET /api/tenants') {
+      const admin = isAdmin(req);
       const rows = db.prepare(
-        'SELECT id, name, notes, created_at FROM tenants ORDER BY name COLLATE NOCASE'
+        `SELECT id, name, notes, active, created_at FROM tenants
+         ${admin ? '' : 'WHERE active = 1'}
+         ORDER BY name COLLATE NOCASE`
       ).all();
       return sendJSON(res, 200, rows);
     }
@@ -290,31 +348,43 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 400, { error: 'name is required' });
       }
       const id = Number(
-        db.prepare('INSERT INTO tenants (name, notes, created_at) VALUES (?, ?, ?)')
+        db.prepare('INSERT INTO tenants (name, notes, active, created_at) VALUES (?, ?, 1, ?)')
           .run(String(body.name).trim(), String(body.notes || ''), nowMs()).lastInsertRowid
       );
+      broadcast('change', {});
       return sendJSON(res, 201, { id, name: String(body.name).trim() });
     }
 
-    if (route === 'PUT /api/tenants/:id' || route === 'DELETE /api/tenants/:id') {
+    let mTenant = url.pathname.match(/^\/api\/tenants\/(\d+)$/);
+    if (mTenant && (req.method === 'PUT' || req.method === 'DELETE')) {
       if (!requireAdmin(res, req)) return;
-      const id = Number(url.pathname.split('/').pop());
+      const id = Number(mTenant[1]);
       if (req.method === 'DELETE') {
-        db.prepare('DELETE FROM tenants WHERE id = ?').run(id);
+        // Soft-delete: preserve the tenant and its people + history.
+        db.prepare('UPDATE tenants SET active = 0 WHERE id = ?').run(id);
+        broadcast('change', {});
         return sendJSON(res, 200, { ok: true });
       }
       const body = await readBody(req);
-      db.prepare('UPDATE tenants SET name = ?, notes = ? WHERE id = ?')
-        .run(String(body.name || '').trim(), String(body.notes || ''), id);
+      db.prepare('UPDATE tenants SET name = ?, notes = ?, active = ? WHERE id = ?')
+        .run(
+          String(body.name || '').trim(),
+          String(body.notes || ''),
+          body.active === 0 || body.active === false ? 0 : 1,
+          id
+        );
+      broadcast('change', {});
       return sendJSON(res, 200, { ok: true });
     }
 
     // ---- People ------------------------------------------------------------
     if (route === 'GET /api/people') {
+      const admin = isAdmin(req);
       const search = url.searchParams.get('search') || '';
       const tenantId = url.searchParams.get('tenant_id') || null;
       const clauses = ['1=1'];
       const params = [];
+      if (!admin) clauses.push('p.active = 1 AND t.active = 1');
       if (search) {
         clauses.push('(p.name LIKE ? OR p.phone LIKE ?)');
         const like = `%${search}%`;
@@ -325,7 +395,7 @@ const server = http.createServer(async (req, res) => {
         params.push(Number(tenantId));
       }
       const rows = db.prepare(`
-        SELECT p.id, p.name, p.phone, p.tenant_id, p.active, t.name AS tenant_name
+        SELECT p.id, p.name, p.phone, p.tenant_id, p.active, t.name AS tenant_name, t.active AS tenant_active
         FROM people p JOIN tenants t ON t.id = p.tenant_id
         WHERE ${clauses.join(' AND ')}
         ORDER BY t.name COLLATE NOCASE, p.name COLLATE NOCASE
@@ -340,32 +410,40 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 400, { error: 'name is required' });
       }
       const tenantId = Number(body.tenant_id);
-      const tenant = db.prepare('SELECT id FROM tenants WHERE id = ?').get(tenantId);
-      if (!tenant) return sendJSON(res, 400, { error: 'tenant_id does not exist' });
+      const tenant = db.prepare('SELECT id FROM tenants WHERE id = ? AND active = 1').get(tenantId);
+      if (!tenant) return sendJSON(res, 400, { error: 'tenant_id does not exist or is inactive' });
       const id = Number(
         db.prepare(
           'INSERT INTO people (tenant_id, name, phone, active, created_at) VALUES (?, ?, ?, 1, ?)'
         ).run(tenantId, String(body.name).trim(), String(body.phone || ''), nowMs()).lastInsertRowid
       );
+      broadcast('change', {});
       return sendJSON(res, 201, { id, name: String(body.name).trim() });
     }
 
-    if (route === 'PUT /api/people/:id' || route === 'DELETE /api/people/:id') {
+    let mPerson = url.pathname.match(/^\/api\/people\/(\d+)$/);
+    if (mPerson && (req.method === 'PUT' || req.method === 'DELETE')) {
       if (!requireAdmin(res, req)) return;
-      const id = Number(url.pathname.split('/').pop());
+      const id = Number(mPerson[1]);
       if (req.method === 'DELETE') {
-        db.prepare('DELETE FROM people WHERE id = ?').run(id);
+        // Soft-delete: history is preserved; the person can be restored.
+        db.prepare('UPDATE people SET active = 0 WHERE id = ?').run(id);
+        broadcast('change', {});
         return sendJSON(res, 200, { ok: true });
       }
       const body = await readBody(req);
+      const tenantId = Number(body.tenant_id);
+      const tenant = db.prepare('SELECT id FROM tenants WHERE id = ? AND active = 1').get(tenantId);
+      if (!tenant) return sendJSON(res, 400, { error: 'tenant_id does not exist or is inactive' });
       db.prepare('UPDATE people SET tenant_id = ?, name = ?, phone = ?, active = ? WHERE id = ?')
         .run(
-          Number(body.tenant_id),
+          tenantId,
           String(body.name || '').trim(),
           String(body.phone || ''),
-          body.active ? 1 : 0,
+          body.active === 0 || body.active === false ? 0 : 1,
           id
         );
+      broadcast('change', {});
       return sendJSON(res, 200, { ok: true });
     }
 
@@ -382,21 +460,38 @@ const server = http.createServer(async (req, res) => {
       ).get(personId);
       if (!person) return sendJSON(res, 404, { error: 'person not found or inactive' });
 
+      const ts = nowMs();
       const id = Number(
         db.prepare(
           'INSERT INTO clock_events (person_id, tenant_id, direction, clocked_at, notes) VALUES (?, ?, ?, ?, ?)'
-        ).run(personId, person.tenant_id, direction, nowMs(), String(body.notes || '')).lastInsertRowid
+        ).run(personId, person.tenant_id, direction, ts, String(body.notes || '')).lastInsertRowid
       );
-      return sendJSON(res, 201, { id, person_id: personId, direction, clocked_at: nowMs() });
+      broadcast('clock', { id, person_id: personId, direction, clocked_at: ts });
+      return sendJSON(res, 201, { id, person_id: personId, direction, clocked_at: ts });
     }
 
     if (route === 'GET /api/status') {
       const search = url.searchParams.get('search') || '';
       const tenantId = url.searchParams.get('tenant_id') || null;
-      const result = buildStatus(search, tenantId ? Number(tenantId) : null);
+      const result = buildStatus(search, tenantId ? Number(tenantId) : null, false);
       return sendJSON(res, 200, result);
     }
 
+    // ---- Undo (kiosk): remove a very recent clock event --------------------
+    let mEvent = url.pathname.match(/^\/api\/events\/(\d+)$/);
+    if (mEvent && req.method === 'DELETE') {
+      const id = Number(mEvent[1]);
+      const ev = db.prepare('SELECT clocked_at FROM clock_events WHERE id = ?').get(id);
+      if (!ev) return sendJSON(res, 404, { error: 'event not found' });
+      if (nowMs() - ev.clocked_at > UNDO_WINDOW_MS) {
+        return sendJSON(res, 409, { error: 'event too old to undo' });
+      }
+      db.prepare('DELETE FROM clock_events WHERE id = ?').run(id);
+      broadcast('clock', { undone: id });
+      return sendJSON(res, 200, { ok: true });
+    }
+
+    // ---- Events (admin) ----------------------------------------------------
     if (route === 'GET /api/events') {
       if (!requireAdmin(res, req)) return;
       const personId = url.searchParams.get('person_id');
@@ -419,13 +514,39 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, rows);
     }
 
+    // ---- CSV export (admin) ------------------------------------------------
+    if (route === 'GET /api/events/export') {
+      if (!requireAdmin(res, req)) return;
+      const rows = db.prepare(`
+        SELECT ce.clocked_at, p.name AS person_name, t.name AS tenant_name, ce.direction, ce.notes
+        FROM clock_events ce
+        JOIN people p ON p.id = ce.person_id
+        JOIN tenants t ON t.id = ce.tenant_id
+        ORDER BY ce.clocked_at ASC
+      `).all();
+      const lines = ['clocked_at,person,tenant,direction,notes'];
+      for (const r of rows) {
+        lines.push([
+          new Date(r.clocked_at).toISOString(),
+          csvEscape(r.person_name),
+          csvEscape(r.tenant_name),
+          r.direction,
+          csvEscape(r.notes),
+        ].join(','));
+      }
+      const body = lines.join('\n') + '\n';
+      res.writeHead(200, {
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': 'attachment; filename="clock-events.csv"',
+        'Content-Length': Buffer.byteLength(body),
+      });
+      return res.end(body);
+    }
+
     // ---- Reset all to OUT (admin convenience) ------------------------------
     if (route === 'POST /api/reset') {
       if (!requireAdmin(res, req)) return;
-      // Clock everyone OUT now (one event per active person currently IN).
-      const people = db.prepare(
-        'SELECT id, tenant_id FROM people WHERE active = 1'
-      ).all();
+      const people = db.prepare('SELECT id, tenant_id FROM people WHERE active = 1').all();
       const latest = latestEventPerPerson();
       const inMap = new Map();
       for (const e of latest) inMap.set(e.person_id, e.direction);
@@ -440,6 +561,7 @@ const server = http.createServer(async (req, res) => {
           count++;
         }
       }
+      broadcast('clock', { reset: true });
       return sendJSON(res, 200, { ok: true, clocked_out: count });
     }
 

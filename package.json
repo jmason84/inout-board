@@ -1,7 +1,7 @@
 {
   "name": "inout-board",
-  "version": "1.0.0",
-  "description": "Multi-tenant clock in/out board with SQLite persistence, admin controls, and global search.",
+  "version": "2.0.0",
+  "description": "Multi-tenant clock in/out board with SQLite persistence, admin controls, live updates, and global search.",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {

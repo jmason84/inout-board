@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>IN/OUT Board</title>
   <link rel="stylesheet" href="/style.css" />
+  <link rel="icon" href="data:," />
 </head>
 <body>
   <header class="topbar">
@@ -13,7 +14,7 @@
       <h1>IN/OUT Board</h1>
     </div>
     <nav class="tabs" id="tabs">
-      <button class="tab active" data-view="clock">Clock In/Out</button>
+      <button class="tab active" data-view="clock">Clock In / Out</button>
       <button class="tab" data-view="status">Status Board</button>
       <button class="tab" data-view="admin">Admin</button>
     </nav>
@@ -25,15 +26,10 @@
     <section id="view-clock" class="view active">
       <div class="search-wrap">
         <input
-          type="text"
-          id="clockSearch"
-          class="search"
-          placeholder="Search all tenants and people…"
-          autocomplete="off"
-          autofocus
-        />
+          type="text" id="clockSearch" class="search"
+          placeholder="Search anyone, any tenant…" autocomplete="off" autofocus />
       </div>
-      <div class="hint">Search across <em>all</em> tenants. Tap a person to clock them <strong>in</strong> or <strong>out</strong>.</div>
+      <div class="hint">Search across <em>all</em> tenants, or tap a person to toggle <strong>IN</strong> / <strong>OUT</strong>.</div>
       <div id="clockResults" class="card-list"></div>
     </section>
 
@@ -44,7 +40,6 @@
         <select id="statusTenant" class="select">
           <option value="">All tenants</option>
         </select>
-        <button id="refreshStatus" class="btn">Refresh</button>
       </div>
       <div class="summary" id="statusSummary"></div>
       <div id="statusBoard" class="status-board"></div>
@@ -83,9 +78,13 @@
           </div>
         </div>
         <div class="card">
-          <h2>Recent clock events</h2>
-          <button id="refreshEvents" class="btn">Refresh</button>
-          <button id="resetAll" class="btn danger">Clock everyone OUT (end of day)</button>
+          <div class="events-head">
+            <h2>Recent clock events</h2>
+            <div class="events-actions">
+              <button id="exportCsv" class="btn">Export CSV</button>
+              <button id="resetAll" class="btn danger">Clock everyone OUT</button>
+            </div>
+          </div>
           <div class="table-wrap">
             <table class="events-table">
               <thead>
@@ -99,7 +98,10 @@
     </section>
   </main>
 
-  <div id="toast" class="toast" hidden></div>
+  <div id="toast" class="toast" hidden>
+    <span id="toastMsg"></span>
+    <button id="toastUndo" class="toast-undo" hidden>Undo</button>
+  </div>
 
   <script src="/app.js"></script>
 </body>

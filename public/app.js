@@ -5,6 +5,7 @@
 // ---------------------------------------------------------------------------
 
 let adminToken = localStorage.getItem('inout_admin_token') || '';
+let lastEventId = null; // for the "Undo" toast
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
@@ -19,13 +20,15 @@ function api(path, opts = {}) {
   return fetch(path, { ...opts, headers: { ...headers, ...(opts.headers || {}) } });
 }
 
-function toast(msg, isError = false) {
+let toastTimer;
+function toast(msg, { isError = false, undo = false } = {}) {
   const el = $('#toast');
-  el.textContent = msg;
+  $('#toastMsg').textContent = msg;
+  $('#toastUndo').hidden = !undo;
   el.className = 'toast' + (isError ? ' error' : '');
   el.hidden = false;
-  clearTimeout(el._t);
-  el._t = setTimeout(() => { el.hidden = true; }, 2600);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.hidden = true; }, undo ? 6000 : 2600);
 }
 
 function fmtTime(ms) {
@@ -36,10 +39,34 @@ function fmtTime(ms) {
   });
 }
 
+function fmtClock(ms) {
+  if (!ms) return '';
+  return new Date(ms).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+}
+
+// "1h 24m" style duration, live-friendly
+function fmtElapsed(ms) {
+  if (!ms) return '';
+  const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${sec}s`;
+  return `${sec}s`;
+}
+
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   }[c]));
+}
+
+function initials(name) {
+  const parts = String(name || '?').trim().split(/\s+/);
+  const first = (parts[0] || '?')[0];
+  const last = parts.length > 1 ? parts[parts.length - 1][0] : '';
+  return (first + last).toUpperCase();
 }
 
 function badge(status) {
@@ -63,7 +90,7 @@ $$('.tab').forEach((tab) => {
 });
 
 // ---------------------------------------------------------------------------
-// Header clock
+// Header clock + elapsed ticker
 // ---------------------------------------------------------------------------
 
 function tickClock() {
@@ -71,9 +98,38 @@ function tickClock() {
     weekday: 'short', month: 'short', day: 'numeric',
     hour: 'numeric', minute: '2-digit', second: '2-digit',
   });
+  // Live-update every visible "elapsed since" value.
+  $$('[data-elapsed]').forEach((el) => {
+    el.textContent = fmtElapsed(Number(el.dataset.at));
+  });
 }
 setInterval(tickClock, 1000);
 tickClock();
+
+// ---------------------------------------------------------------------------
+// Live updates (SSE with polling fallback)
+// ---------------------------------------------------------------------------
+
+let liveSource = null;
+function initLive() {
+  try {
+    if (!('EventSource' in window)) throw new Error('no SSE');
+    liveSource = new EventSource('/api/stream');
+    liveSource.addEventListener('clock', () => { loadClock(); loadStatus(); });
+    liveSource.addEventListener('change', () => { loadClock(); loadStatus(); loadAdmin(); });
+    liveSource.onerror = () => { /* fall back to polling below */ };
+  } catch {
+    liveSource = null;
+  }
+  if (!liveSource || liveSource.readyState === 2) {
+    // Polling fallback (also covers broken proxies).
+    setInterval(() => {
+      if (!$('#view-clock').classList.contains('active') &&
+          !$('#view-status').classList.contains('active')) return;
+      loadClock(); loadStatus();
+    }, 15000);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // CLOCK VIEW
@@ -88,36 +144,50 @@ async function loadClock() {
     wrap.innerHTML = '<p class="hint">No people found.</p>';
     return;
   }
-  wrap.innerHTML = people.map((p) => `
-    <div class="person-card">
-      <div class="person-info">
-        <div class="person-name">${escapeHtml(p.name)}</div>
-        <div class="person-meta">
-          ${escapeHtml(p.tenant_name)}${p.phone ? ' · ' + escapeHtml(p.phone) : ''}
-          ${p.clocked_at ? ' · last: ' + fmtTime(p.clocked_at) : ''}
+  wrap.innerHTML = people.map((p) => {
+    const isIn = p.status === 'in';
+    const nextDir = isIn ? 'out' : 'in';
+    const btnLabel = isIn ? 'Clock OUT' : 'Clock IN';
+    const btnClass = isIn ? 'toggle-out' : 'toggle-in';
+    return `
+      <div class="person-card" data-person="${p.id}">
+        <div class="avatar ${p.status}">${initials(p.name)}</div>
+        <div class="person-info">
+          <div class="person-name">${escapeHtml(p.name)}</div>
+          <div class="person-meta">
+            ${escapeHtml(p.tenant_name)}${p.phone ? ' · ' + escapeHtml(p.phone) : ''}
+          </div>
         </div>
+        ${badge(p.status)}
+        <span class="elapsed ${p.status}" data-elapsed data-at="${p.clocked_at || ''}">
+          ${p.clocked_at ? fmtElapsed(p.clocked_at) : ''}
+        </span>
+        <input type="text" class="note-input" placeholder="Note (optional)" maxlength="80" />
+        <button class="btn ${btnClass}" data-id="${p.id}" data-name="${escapeHtml(p.name)}" data-dir="${nextDir}">${btnLabel}</button>
       </div>
-      ${badge(p.status)}
-      <span class="badge tenant">${escapeHtml(p.tenant_name)}</span>
-      <button class="btn in" data-id="${p.id}" data-name="${escapeHtml(p.name)}" data-dir="in">Clock IN</button>
-      <button class="btn out" data-id="${p.id}" data-name="${escapeHtml(p.name)}" data-dir="out">Clock OUT</button>
-    </div>
-  `).join('');
+    `;
+  }).join('');
 
-  wrap.querySelectorAll('button').forEach((btn) => {
+  wrap.querySelectorAll('button[data-dir]').forEach((btn) => {
     btn.addEventListener('click', async () => {
-      const id = btn.dataset.id;
-      const dir = btn.dataset.dir;
+      const card = btn.closest('.person-card');
+      const note = card.querySelector('.note-input').value.trim();
+      btn.disabled = true;
       const res = await api('/api/clock', {
         method: 'POST',
-        body: JSON.stringify({ person_id: Number(id), direction: dir }),
+        body: JSON.stringify({ person_id: Number(btn.dataset.id), direction: btn.dataset.dir, notes: note }),
       });
+      btn.disabled = false;
       if (res.ok) {
-        toast(`${btn.dataset.name} clocked ${dir.toUpperCase()}`);
+        const d = await res.json();
+        lastEventId = d.id;
+        const dirLabel = btn.dataset.dir.toUpperCase();
+        toast(`${btn.dataset.name} clocked ${dirLabel}`, { undo: true });
+        if (card) card.querySelector('.note-input').value = '';
         loadClock();
       } else {
         const err = await res.json();
-        toast(err.error || 'Clock failed', true);
+        toast(err.error || 'Clock failed', { isError: true });
       }
     });
   });
@@ -126,7 +196,21 @@ async function loadClock() {
 let clockDebounce;
 $('#clockSearch').addEventListener('input', () => {
   clearTimeout(clockDebounce);
-  clockDebounce = setTimeout(loadClock, 200);
+  clockDebounce = setTimeout(loadClock, 150);
+});
+
+// Undo the last clock event
+$('#toastUndo').addEventListener('click', async () => {
+  if (!lastEventId) return;
+  const res = await api(`/api/events/${lastEventId}`, { method: 'DELETE' });
+  lastEventId = null;
+  if (res.ok) {
+    toast('Undone');
+    loadClock(); loadStatus();
+  } else {
+    const err = await res.json();
+    toast(err.error || 'Could not undo', { isError: true });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -134,7 +218,6 @@ $('#clockSearch').addEventListener('input', () => {
 // ---------------------------------------------------------------------------
 
 async function loadStatus() {
-  // Populate tenant filter once
   if (!$('#statusTenant').dataset.loaded) {
     const tenants = await (await api('/api/tenants')).json();
     $('#statusTenant').innerHTML = '<option value="">All tenants</option>' +
@@ -160,9 +243,9 @@ async function loadStatus() {
   }
 
   $('#statusSummary').innerHTML = `
-    <div class="sum-stat">IN <b>${inCount}</b></div>
-    <div class="sum-stat">OUT <b>${outCount}</b></div>
-    <div class="sum-stat">Total <b>${people.length}</b></div>
+    <div class="sum-stat in"><b>${inCount}</b><span class="lbl">IN</span></div>
+    <div class="sum-stat out"><b>${outCount}</b><span class="lbl">OUT</span></div>
+    <div class="sum-stat"><b>${people.length}</b><span class="lbl">Total</span></div>
   `;
 
   const board = $('#statusBoard');
@@ -172,28 +255,28 @@ async function loadStatus() {
   }
   board.innerHTML = [...byTenant.entries()].map(([tenant, rows]) => `
     <div class="tenant-group">
-      <h3>${escapeHtml(tenant)}</h3>
-      <table>
-        <thead><tr><th>Name</th><th>Phone</th><th>Status</th><th>Last clock</th><th>Notes</th></tr></thead>
-        <tbody>
-          ${rows.map((p) => `
-            <tr>
-              <td>${escapeHtml(p.name)}</td>
-              <td>${escapeHtml(p.phone || '—')}</td>
-              <td>${badge(p.status)}</td>
-              <td>${fmtTime(p.clocked_at)}</td>
-              <td>${escapeHtml(p.notes || '')}</td>
-            </tr>
-          `).join('')}
-        </tbody>
-      </table>
+      <h3>${escapeHtml(tenant)} <span class="count">${rows.length}</span></h3>
+      <div class="status-grid">
+        ${rows.map((p) => `
+          <div class="status-card ${p.status}">
+            <div class="top">
+              <div class="avatar ${p.status}">${initials(p.name)}</div>
+              <div class="name">${escapeHtml(p.name)}</div>
+              ${badge(p.status)}
+            </div>
+            <div class="meta">${escapeHtml(p.phone || '')}</div>
+            <div class="last" data-elapsed data-at="${p.clocked_at || ''}">
+              ${p.clocked_at ? 'Since ' + fmtClock(p.clocked_at) + ' · ' + fmtElapsed(p.clocked_at) : 'No activity'}
+            </div>
+          </div>
+        `).join('')}
+      </div>
     </div>
   `).join('');
 }
 
 $('#statusSearch').addEventListener('input', debounce(loadStatus, 200));
 $('#statusTenant').addEventListener('change', loadStatus);
-$('#refreshStatus').addEventListener('click', loadStatus);
 
 // ---------------------------------------------------------------------------
 // ADMIN VIEW
@@ -205,7 +288,6 @@ async function loadAdmin() {
     $('#adminPanel').hidden = true;
     return;
   }
-  // Verify token
   const check = await api('/api/tenants', { admin: true });
   if (check.status === 401) {
     adminToken = '';
@@ -221,7 +303,7 @@ async function loadAdmin() {
 
 $('#adminUnlock').addEventListener('click', () => {
   adminToken = $('#adminToken').value.trim();
-  if (!adminToken) return toast('Enter a token', true);
+  if (!adminToken) return toast('Enter a token', { isError: true });
   localStorage.setItem('inout_admin_token', adminToken);
   loadAdmin();
 });
@@ -229,21 +311,33 @@ $('#adminUnlock').addEventListener('click', () => {
 async function loadTenants() {
   const tenants = await (await api('/api/tenants', { admin: true })).json();
   $('#tenantList').innerHTML = tenants.map((t) => `
-    <div class="item-row">
+    <div class="item-row ${t.active ? '' : 'inactive'}">
       <span class="grow">${escapeHtml(t.name)}</span>
       <span class="mini">${escapeHtml(t.notes || '')}</span>
-      <button class="icon-btn" data-del-tenant="${t.id}" title="Delete">✕</button>
+      ${t.active
+        ? `<button class="icon-btn del" data-del-tenant="${t.id}" title="Deactivate">✕</button>`
+        : `<button class="icon-btn restore" data-restore-tenant="${t.id}">Restore</button>`}
     </div>
   `).join('') || '<p class="hint">No tenants yet.</p>';
 
-  $('#personTenant').innerHTML = tenants.map((t) =>
+  const activeTenants = tenants.filter((t) => t.active);
+  $('#personTenant').innerHTML = activeTenants.map((t) =>
     `<option value="${t.id}">${escapeHtml(t.name)}</option>`).join('');
 
   $$('#tenantList [data-del-tenant]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       const res = await api(`/api/tenants/${btn.dataset.delTenant}`, { method: 'DELETE', admin: true });
-      if (res.ok) { toast('Tenant deleted'); loadTenants(); loadPeople(); }
-      else toast('Delete failed', true);
+      if (res.ok) { toast('Tenant deactivated'); loadTenants(); loadPeople(); }
+      else toast('Delete failed', { isError: true });
+    });
+  });
+  $$('#tenantList [data-restore-tenant]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const res = await api(`/api/tenants/${btn.dataset.restoreTenant}`, {
+        method: 'PUT', admin: true, body: JSON.stringify({ active: true }),
+      });
+      if (res.ok) { toast('Tenant restored'); loadTenants(); loadPeople(); }
+      else toast('Restore failed', { isError: true });
     });
   });
 }
@@ -251,18 +345,29 @@ async function loadTenants() {
 async function loadPeople() {
   const people = await (await api('/api/people', { admin: true })).json();
   $('#personList').innerHTML = people.map((p) => `
-    <div class="item-row">
+    <div class="item-row ${p.active ? '' : 'inactive'}">
       <span class="grow">${escapeHtml(p.name)}</span>
       <span class="mini">${escapeHtml(p.tenant_name)}${p.phone ? ' · ' + escapeHtml(p.phone) : ''}</span>
-      <button class="icon-btn" data-del-person="${p.id}" title="Delete">✕</button>
+      ${p.active
+        ? `<button class="icon-btn del" data-del-person="${p.id}" title="Deactivate">✕</button>`
+        : `<button class="icon-btn restore" data-restore-person="${p.id}">Restore</button>`}
     </div>
   `).join('') || '<p class="hint">No people yet.</p>';
 
   $$('#personList [data-del-person]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       const res = await api(`/api/people/${btn.dataset.delPerson}`, { method: 'DELETE', admin: true });
-      if (res.ok) { toast('Person deleted'); loadPeople(); }
-      else toast('Delete failed', true);
+      if (res.ok) { toast('Person deactivated'); loadPeople(); }
+      else toast('Delete failed', { isError: true });
+    });
+  });
+  $$('#personList [data-restore-person]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const res = await api(`/api/people/${btn.dataset.restorePerson}`, {
+        method: 'PUT', admin: true, body: JSON.stringify({ active: true }),
+      });
+      if (res.ok) { toast('Person restored'); loadPeople(); }
+      else toast('Restore failed', { isError: true });
     });
   });
 }
@@ -280,11 +385,23 @@ async function loadEvents() {
   `).join('') || '<tr><td colspan="5">No events yet.</td></tr>';
 }
 
+$('#exportCsv').addEventListener('click', async () => {
+  const res = await api('/api/events/export', { admin: true });
+  if (!res.ok) return toast('Export failed', { isError: true });
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'clock-events.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
 $('#tenantForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const name = $('#tenantName').value.trim();
   const notes = $('#tenantNotes').value.trim();
-  if (!name) return toast('Tenant name required', true);
+  if (!name) return toast('Tenant name required', { isError: true });
   const res = await api('/api/tenants', {
     method: 'POST', admin: true,
     body: JSON.stringify({ name, notes }),
@@ -295,7 +412,7 @@ $('#tenantForm').addEventListener('submit', async (e) => {
     loadTenants();
   } else {
     const err = await res.json();
-    toast(err.error || 'Failed', true);
+    toast(err.error || 'Failed', { isError: true });
   }
 });
 
@@ -304,8 +421,8 @@ $('#personForm').addEventListener('submit', async (e) => {
   const name = $('#personName').value.trim();
   const phone = $('#personPhone').value.trim();
   const tenant_id = Number($('#personTenant').value);
-  if (!name) return toast('Name required', true);
-  if (!tenant_id) return toast('Add a tenant first', true);
+  if (!name) return toast('Name required', { isError: true });
+  if (!tenant_id) return toast('Add a tenant first', { isError: true });
   const res = await api('/api/people', {
     method: 'POST', admin: true,
     body: JSON.stringify({ name, phone, tenant_id }),
@@ -316,16 +433,15 @@ $('#personForm').addEventListener('submit', async (e) => {
     loadPeople();
   } else {
     const err = await res.json();
-    toast(err.error || 'Failed', true);
+    toast(err.error || 'Failed', { isError: true });
   }
 });
 
-$('#refreshEvents').addEventListener('click', loadEvents);
 $('#resetAll').addEventListener('click', async () => {
   if (!confirm('Clock everyone currently IN to OUT (end of day)?')) return;
   const res = await api('/api/reset', { method: 'POST', admin: true });
   if (res.ok) { const d = await res.json(); toast(`Reset: ${d.clocked_out} clocked out`); loadEvents(); }
-  else toast('Reset failed', true);
+  else toast('Reset failed', { isError: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -342,3 +458,4 @@ function debounce(fn, ms) {
 // ---------------------------------------------------------------------------
 
 loadClock();
+initLive();
