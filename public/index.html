@@ -103,6 +103,18 @@
     <button id="toastUndo" class="toast-undo" hidden>Undo</button>
   </div>
 
+  <!-- PIN modal -->
+  <div id="pinModal" class="modal-overlay" hidden>
+    <div class="modal">
+      <p id="pinHint"></p>
+      <input id="pinInput" type="password" class="search" placeholder="PIN" autocomplete="off" inputmode="numeric" pattern="[0-9]*" />
+      <div class="modal-actions">
+        <button id="pinCancel" class="btn">Cancel</button>
+        <button id="pinConfirm" class="btn primary">Submit</button>
+      </div>
+    </div>
+  </div>
+
   <script src="/app.js"></script>
 </body>
 </html>

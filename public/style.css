@@ -284,6 +284,25 @@ main { max-width: 1180px; margin: 0 auto; padding: 24px; }
 }
 .toast-undo:hover { background: rgba(255,255,255,0.15); }
 
+/* PIN modal */
+.modal-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.5);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 100;
+}
+.modal-overlay[hidden] { display: none; }
+.modal {
+  background: var(--card);
+  border-radius: var(--radius);
+  padding: 28px;
+  box-shadow: 0 16px 48px rgba(0,0,0,0.3);
+  max-width: 380px; width: calc(100vw - 32px);
+}
+.modal p { margin: 0 0 16px; font-size: 15px; color: var(--text); line-height: 1.4; }
+.modal .search { margin-bottom: 14px; }
+.modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
 /* Mobile */
 @media (max-width: 640px) {
   .topbar { padding: 10px 14px; gap: 10px; }

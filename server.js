@@ -20,6 +20,7 @@
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 
 const PORT = Number(process.env.PORT || 3000);
@@ -58,6 +59,8 @@ CREATE TABLE IF NOT EXISTS people (
   name       TEXT NOT NULL,
   phone      TEXT NOT NULL DEFAULT '',
   active     INTEGER NOT NULL DEFAULT 1,
+  pin_hash   TEXT NOT NULL DEFAULT '',
+  pin_salt   TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL
 );
 
@@ -75,12 +78,22 @@ CREATE INDEX IF NOT EXISTS idx_events_person ON clock_events(person_id);
 CREATE INDEX IF NOT EXISTS idx_events_time   ON clock_events(clocked_at);
 `);
 
-// Lightweight migration: older DBs (v1) had no `active` column on tenants.
+// Lightweight migration: older DBs (v1) had no `active` column on tenants,
+// and no `pin_hash`/`pin_salt` on people.
 function migrate() {
-  const cols = db.prepare('PRAGMA table_info(tenants)').all().map((c) => c.name);
-  if (!cols.includes('active')) {
+  const tcols = db.prepare('PRAGMA table_info(tenants)').all().map((c) => c.name);
+  if (!tcols.includes('active')) {
     db.exec('ALTER TABLE tenants ADD COLUMN active INTEGER NOT NULL DEFAULT 1');
     console.log('Migrated: added tenants.active column.');
+  }
+  const pcols = db.prepare('PRAGMA table_info(people)').all().map((c) => c.name);
+  if (!pcols.includes('pin_hash')) {
+    db.exec('ALTER TABLE people ADD COLUMN pin_hash TEXT NOT NULL DEFAULT \'\'');
+    console.log('Migrated: added people.pin_hash column.');
+  }
+  if (!pcols.includes('pin_salt')) {
+    db.exec('ALTER TABLE people ADD COLUMN pin_salt TEXT NOT NULL DEFAULT \'\'');
+    console.log('Migrated: added people.pin_salt column.');
   }
 }
 migrate();
@@ -251,6 +264,34 @@ function openStream(req, res) {
 
 function nowMs() { return Date.now(); }
 
+// --- PIN handling --------------------------------------------------------
+// PINs are stored as scrypt hashes with a per-person random salt. Never
+// stored in plaintext, and compared in constant time.
+
+const PIN_RE = /^\d{4,8}$/; // 4–8 digits
+
+function hashPin(pin, salt) {
+  return crypto.scryptSync(String(pin), salt, 64).toString('hex');
+}
+
+function setPersonPin(personId, pin) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = hashPin(pin, salt);
+  db.prepare('UPDATE people SET pin_hash = ?, pin_salt = ? WHERE id = ?').run(hash, salt, personId);
+}
+
+function clearPersonPin(personId) {
+  db.prepare("UPDATE people SET pin_hash = '', pin_salt = '' WHERE id = ?").run(personId);
+}
+
+function pinIsCorrect(person, pin) {
+  if (!person || !person.pin_hash) return false;
+  const hash = hashPin(pin, person.pin_salt);
+  const a = Buffer.from(hash, 'hex');
+  const b = Buffer.from(person.pin_hash, 'hex');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
 function latestEventPerPerson() {
   return db.prepare(`
     SELECT ce.*
@@ -281,7 +322,7 @@ function buildStatus(search, tenantId, includeInactive) {
   }
 
   const rows = db.prepare(`
-    SELECT p.id, p.name, p.phone, p.tenant_id, t.name AS tenant_name
+    SELECT p.id, p.name, p.phone, p.tenant_id, t.name AS tenant_name, p.pin_hash
     FROM people p
     JOIN tenants t ON t.id = p.tenant_id
     WHERE ${clauses.join(' AND ')}
@@ -296,6 +337,7 @@ function buildStatus(search, tenantId, includeInactive) {
       phone: r.phone,
       tenant_id: r.tenant_id,
       tenant_name: r.tenant_name,
+      has_pin: Boolean(r.pin_hash),
       status: last ? last.direction : 'none',
       clocked_at: last ? last.clocked_at : null,
       notes: last ? last.notes : '',
@@ -395,12 +437,16 @@ const server = http.createServer(async (req, res) => {
         params.push(Number(tenantId));
       }
       const rows = db.prepare(`
-        SELECT p.id, p.name, p.phone, p.tenant_id, p.active, t.name AS tenant_name, t.active AS tenant_active
+        SELECT p.id, p.name, p.phone, p.tenant_id, p.active, p.pin_hash, t.name AS tenant_name, t.active AS tenant_active
         FROM people p JOIN tenants t ON t.id = p.tenant_id
         WHERE ${clauses.join(' AND ')}
         ORDER BY t.name COLLATE NOCASE, p.name COLLATE NOCASE
       `).all(...params);
-      return sendJSON(res, 200, rows);
+      return sendJSON(res, 200, rows.map((r) => ({
+        ...r,
+        has_pin: Boolean(r.pin_hash),
+        pin_hash: undefined,
+      })));
     }
 
     if (route === 'POST /api/people') {
@@ -447,18 +493,54 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, { ok: true });
     }
 
-    // ---- Clock in / out ----------------------------------------------------
+    // ---- Admin: set / reset a person's PIN ---------------------------------
+    let mPin = url.pathname.match(/^\/api\/people\/(\d+)\/pin$/);
+    if (mPin && req.method === 'POST') {
+      if (!requireAdmin(res, req)) return;
+      const id = Number(mPin[1]);
+      const body = await readBody(req);
+      const pin = String(body.pin || '');
+      const person = db.prepare('SELECT id FROM people WHERE id = ?').get(id);
+      if (!person) return sendJSON(res, 404, { error: 'person not found' });
+      if (pin === '') {
+        clearPersonPin(id);
+        broadcast('change', {});
+        return sendJSON(res, 200, { ok: true, cleared: true });
+      }
+      if (!PIN_RE.test(pin)) {
+        return sendJSON(res, 400, { error: 'PIN must be 4–8 digits' });
+      }
+      setPersonPin(id, pin);
+      broadcast('change', {});
+      return sendJSON(res, 200, { ok: true, set: true });
+    }
+
+    // ---- Clock in / out (PIN-authenticated) --------------------------------
     if (route === 'POST /api/clock') {
       const body = await readBody(req);
       const personId = Number(body.person_id);
       const direction = String(body.direction || '').toLowerCase();
+      const pin = String(body.pin || '');
       if (!['in', 'out'].includes(direction)) {
         return sendJSON(res, 400, { error: 'direction must be "in" or "out"' });
       }
       const person = db.prepare(
-        'SELECT id, tenant_id FROM people WHERE id = ? AND active = 1'
+        'SELECT id, tenant_id, pin_hash, pin_salt FROM people WHERE id = ? AND active = 1'
       ).get(personId);
       if (!person) return sendJSON(res, 404, { error: 'person not found or inactive' });
+
+      // PIN required to clock. If the person has no PIN yet, the submitted PIN
+      // becomes their PIN (first-use self-service set).
+      if (person.pin_hash) {
+        if (!pinIsCorrect(person, pin)) {
+          return sendJSON(res, 401, { error: 'Incorrect PIN' });
+        }
+      } else {
+        if (!PIN_RE.test(pin)) {
+          return sendJSON(res, 400, { error: 'PIN required: choose a 4–8 digit PIN' });
+        }
+        setPersonPin(personId, pin);
+      }
 
       const ts = nowMs();
       const id = Number(
@@ -467,7 +549,7 @@ const server = http.createServer(async (req, res) => {
         ).run(personId, person.tenant_id, direction, ts, String(body.notes || '')).lastInsertRowid
       );
       broadcast('clock', { id, person_id: personId, direction, clocked_at: ts });
-      return sendJSON(res, 201, { id, person_id: personId, direction, clocked_at: ts });
+      return sendJSON(res, 201, { id, person_id: personId, direction, clocked_at: ts, pin_set: !person.pin_hash });
     }
 
     if (route === 'GET /api/status') {
