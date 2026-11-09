@@ -34,9 +34,10 @@ async function search() {
     const next = p.status === 'in' ? 'out' : 'in';
     return `
     <div class="person-card ${p.status}">
+      ${window.IO.avatar(p.name, p.photo_url, 'lg')}
       <div class="person-info">
         <div class="person-name">${escapeHtml(p.name)}</div>
-        <div class="person-meta">${escapeHtml(p.tenant_name)}${p.clocked_at ? ` · ${p.status === 'in' ? 'IN' : 'OUT'} since ${fmtTime(p.clocked_at)}` : ''}</div>
+        <div class="person-meta">${escapeHtml(p.title ? p.title + ' · ' : '')}${escapeHtml(p.tenant_name)}${p.clocked_at ? ` · ${p.status === 'in' ? 'IN' : 'OUT'} since ${fmtTime(p.clocked_at)}` : ''}</div>
       </div>
       <button class="btn big ${next}" data-id="${p.id}" data-name="${escapeHtml(p.name)}" data-dir="${next}">${next.toUpperCase()}</button>
     </div>`;

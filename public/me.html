@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>My Profile — IN/OUT Board</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-dot"></span><h1>My Profile</h1></div>
+    <nav class="tabs"><a class="tab" href="/">← Back to IN/OUT</a></nav>
+    <div class="acct" id="acct" hidden><button class="btn" id="logoutBtn">Sign out</button></div>
+  </header>
+
+  <main class="me-main">
+    <!-- Sign in -->
+    <div class="card gate-card" id="loginCard">
+      <h2>Sign in</h2>
+      <p class="hint">Use the sign-in name and password your admin gave you.</p>
+      <form id="loginForm">
+        <label class="field"><span>Sign-in name</span><input id="loginHandle" class="search" autocomplete="username" autocapitalize="none" required /></label>
+        <label class="field"><span>Password</span><input id="loginPass" type="password" class="search" autocomplete="current-password" required /></label>
+        <div class="form-error" id="loginError" hidden></div>
+        <button type="submit" class="btn primary block">Sign in</button>
+      </form>
+    </div>
+
+    <!-- Forced password change on first login -->
+    <div class="card gate-card" id="pwCard" hidden>
+      <h2>Choose your own password</h2>
+      <p class="hint">Your admin gave you a temporary password. Pick a new one (at least 8 characters) to continue.</p>
+      <form id="pwForm">
+        <label class="field"><span>Temporary password</span><input id="pwCurrent" type="password" class="search" autocomplete="current-password" required /></label>
+        <label class="field"><span>New password</span><input id="pwNext" type="password" class="search" autocomplete="new-password" minlength="8" required /></label>
+        <div class="form-error" id="pwError" hidden></div>
+        <button type="submit" class="btn primary block">Save password</button>
+      </form>
+    </div>
+
+    <!-- Profile -->
+    <div id="profile" hidden>
+      <div class="card profile-head">
+        <div class="photo-col">
+          <div id="photoBox"></div>
+          <div class="btn-row center">
+            <label class="btn">Change photo<input type="file" id="photoFile" accept="image/*" hidden /></label>
+            <button class="btn" id="photoRemove">Remove</button>
+          </div>
+          <p class="mini">Square photos work best. It's resized automatically.</p>
+        </div>
+        <div class="who">
+          <h2 id="pName"></h2>
+          <div class="mini" id="pTenant"></div>
+          <div class="badge none" id="pHandle"></div>
+        </div>
+      </div>
+
+      <form class="card" id="profileForm">
+        <h3>About me</h3>
+        <p class="hint">Your name and tenant are managed by your admin. Everything else is yours to edit.</p>
+        <label class="field"><span>Job title / role</span><input id="fTitle" class="search" maxlength="80" /></label>
+        <label class="field"><span>Phone</span><input id="fPhone" class="search" maxlength="40" /></label>
+        <label class="field"><span>Email</span><input id="fEmail" type="email" class="search" maxlength="120" /></label>
+        <label class="field"><span>Bio</span><textarea id="fBio" class="search" rows="4" maxlength="600" placeholder="A line or two about you"></textarea></label>
+        <div class="form-error" id="profileError" hidden></div>
+        <button class="btn primary" type="submit">Save profile</button>
+      </form>
+
+      <div class="card">
+        <h3>My recent shifts</h3>
+        <div class="table-wrap"><table>
+          <thead><tr><th>In</th><th>Out</th><th>Duration</th></tr></thead>
+          <tbody id="shiftsBody"></tbody>
+        </table></div>
+      </div>
+
+      <form class="card" id="pwChangeForm">
+        <h3>Change password</h3>
+        <label class="field"><span>Current password</span><input id="cpCurrent" type="password" class="search" autocomplete="current-password" required /></label>
+        <label class="field"><span>New password (min 8 characters)</span><input id="cpNext" type="password" class="search" autocomplete="new-password" minlength="8" required /></label>
+        <button class="btn" type="submit">Change password</button>
+      </form>
+    </div>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="/shared.js"></script>
+  <script src="/me.js"></script>
+</body>
+</html>

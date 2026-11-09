@@ -295,15 +295,17 @@ async function loadPeople() {
   peopleCache = people;
   $('#peopleBody').innerHTML = people.map((p) => `
     <tr class="${p.active ? '' : 'inactive'}">
-      <td><b>${escapeHtml(p.name)}</b></td><td>${escapeHtml(p.tenant_name)}</td><td>${escapeHtml(p.phone || '—')}</td>
+      <td><div class="name-cell">${IO.avatar(p.name, p.photo_url, 'sm')}<div><b>${escapeHtml(p.name)}</b>${p.title ? `<div class="mini">${escapeHtml(p.title)}</div>` : ''}</div></div></td><td>${escapeHtml(p.tenant_name)}</td><td>${escapeHtml(p.phone || '—')}</td>
       <td>${p.active ? badge(st.get(p.id) || 'none') : '<span class="mini">inactive</span>'}</td>
       <td>${p.active ? 'Yes' : 'No'}</td>
       <td class="actions">
+        <button class="icon-btn" data-profile-person="${p.id}" title="Profile & photo">👤</button>
         <button class="icon-btn" data-edit-person="${p.id}" title="Edit">✎</button>
         <button class="icon-btn" data-log-person="${p.id}" title="Time log">⏱</button>
         <button class="icon-btn danger" data-del-person="${p.id}" title="Delete">✕</button>
       </td></tr>`).join('') || '<tr><td colspan="6" class="hint">No people found.</td></tr>';
 
+  $$('[data-profile-person]').forEach((b) => b.addEventListener('click', () => openProfile(Number(b.dataset.profilePerson))));
   $$('[data-edit-person]').forEach((b) => b.addEventListener('click', () => editPerson(peopleCache.find((p) => p.id === Number(b.dataset.editPerson)))));
   $$('[data-del-person]').forEach((b) => b.addEventListener('click', async () => {
     const p = peopleCache.find((x) => x.id === Number(b.dataset.delPerson));
@@ -491,7 +493,7 @@ async function loadBoard() {
     <div class="tenant-group"><h3>${escapeHtml(tenant)}</h3>
       <div class="table-wrap"><table>
         <thead><tr><th>Name</th><th>Phone</th><th>Status</th><th>Last clock</th><th>Notes</th></tr></thead>
-        <tbody>${rows.map((p) => `<tr><td><b>${escapeHtml(p.name)}</b></td><td>${escapeHtml(p.phone || '—')}</td>
+        <tbody>${rows.map((p) => `<tr><td><div class="name-cell">${IO.avatar(p.name, p.photo_url, 'sm')}<b>${escapeHtml(p.name)}</b></div></td><td>${escapeHtml(p.phone || '—')}</td>
           <td>${badge(p.status)}</td><td>${fmtTime(p.clocked_at)}</td><td>${escapeHtml(p.notes || '')}</td></tr>`).join('')}</tbody>
       </table></div></div>`).join('') : '<p class="hint center">No people found.</p>';
 }
@@ -536,6 +538,91 @@ $('#changePwBtn').addEventListener('click', async () => {
   const res = await adminFetch('/api/auth/password', { method: 'POST', body: JSON.stringify(v) });
   if (res.ok) toast('Password changed'); else toast((await json(res)).error || 'Failed', true);
 });
+
+// ---------------------------------------------------------------------------
+// ADMIN: person profile dialog (photo, details, sign-in access)
+// ---------------------------------------------------------------------------
+
+let profId = null;
+let profData = null;
+
+function closeProfile() {
+  $('#profBack').hidden = true;
+  profId = null;
+  if (currentAdminPage === 'people') loadPeople().catch(() => {});
+}
+
+function paintProfile() {
+  const p = profData;
+  $('#profAvatar').innerHTML = IO.avatar(p.name, p.photo_url, 'xl');
+  $('#profTitle').textContent = p.name;
+  $('#profSub').textContent = `${p.tenant_name}${p.active ? '' : ' · inactive'}`;
+  $('#profPhotoRemove').hidden = !p.photo_url;
+  $('#pfTitle').value = p.title; $('#pfPhone').value = p.phone; $('#pfEmail').value = p.email; $('#pfBio').value = p.bio;
+  $('#pfError').hidden = true;
+  $('#accessBox').innerHTML = p.has_access
+    ? `<b>Profile sign-in is on.</b>
+       <div class="cred"><span class="mini">Sign-in name</span><code>${escapeHtml(p.handle)}</code><span class="mini">Page</span><code>${escapeHtml(location.origin)}/me</code></div>
+       ${p.must_change ? '<p class="mini">Waiting for them to choose their own password.</p>' : ''}
+       <div class="btn-row access-actions"><button class="btn" id="accReset">Reset password</button><button class="btn danger" id="accRevoke">Turn off sign-in</button></div>`
+    : `<b>No profile sign-in yet.</b>
+       <p class="mini">Create one so this person can sign in at <code>/me</code>, add their own photo and manage their details.</p>
+       <button class="btn primary" id="accCreate">Create sign-in</button>`;
+  const on = (id, fn) => { const el = $(id); if (el) el.addEventListener('click', fn); };
+  on('#accCreate', () => grantAccess(false));
+  on('#accReset', () => grantAccess(true));
+  on('#accRevoke', async () => {
+    if (!await confirmModal('Turn off sign-in', `${p.name} will no longer be able to sign in. Their profile stays.`, 'Turn off')) return;
+    const res = await adminFetch(`/api/people/${p.id}/access`, { method: 'DELETE' });
+    if (res.ok) { toast('Sign-in turned off'); refreshProfile(); } else toast('Failed', true);
+  });
+}
+
+async function refreshProfile() {
+  profData = await json(await adminFetch(`/api/people/${profId}`));
+  paintProfile();
+}
+
+async function openProfile(id) {
+  profId = id;
+  await refreshProfile();
+  $('#profBack').hidden = false;
+}
+
+async function grantAccess(isReset) {
+  const res = await adminFetch(`/api/people/${profId}/access`, { method: 'POST' });
+  if (!res.ok) return toast('Failed', true);
+  const d = await json(res);
+  await refreshProfile();
+  // Show the one-time temporary password.
+  $('#accessBox').insertAdjacentHTML('afterbegin', `
+    <div class="form-error one-time"><b>${isReset ? 'New temporary password' : 'Sign-in created'} — shown once, copy it now.</b>
+      <div class="cred"><span>Sign-in name</span><code>${escapeHtml(d.handle)}</code><span>Temporary password</span><code>${escapeHtml(d.temp_password)}</code></div>
+      <p class="mini">They'll be asked to choose their own password the first time they sign in.</p></div>`);
+}
+
+$('#profFile').addEventListener('change', async (e) => {
+  const file = e.target.files[0]; e.target.value = '';
+  if (!file) return;
+  try { await IO.uploadPhoto(`/api/people/${profId}/photo`, file); toast('Photo updated'); refreshProfile(); }
+  catch (err) { toast(err.message, true); }
+});
+$('#profPhotoRemove').addEventListener('click', async () => {
+  const res = await adminFetch(`/api/people/${profId}/photo`, { method: 'DELETE' });
+  if (res.ok) { toast('Photo removed'); refreshProfile(); } else toast('Failed', true);
+});
+$('#profForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const p = profData;
+  const res = await adminFetch(`/api/people/${p.id}`, { method: 'PUT', body: JSON.stringify({
+    name: p.name, tenant_id: p.tenant_id, active: !!p.active,
+    phone: $('#pfPhone').value, title: $('#pfTitle').value, email: $('#pfEmail').value, bio: $('#pfBio').value,
+  }) });
+  if (res.ok) { toast('Profile saved'); refreshProfile(); }
+  else { const err = $('#pfError'); err.hidden = false; err.textContent = (await json(res)).error || 'Could not save'; }
+});
+$('#profClose').addEventListener('click', closeProfile);
+$('#profBack').addEventListener('click', (e) => { if (e.target === $('#profBack')) closeProfile(); });
 
 // ---------------------------------------------------------------------------
 // Init

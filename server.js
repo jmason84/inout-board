@@ -28,7 +28,8 @@ const DB_PATH = path.join(DATA_DIR, 'inout.sqlite');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const ASSETS_DIR = path.join(__dirname, 'assets');
 
-fs.mkdirSync(DATA_DIR, { recursive: true });
+const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 // ---------------------------------------------------------------------------
 // Database
@@ -79,10 +80,32 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS person_sessions (
+  token_hash TEXT PRIMARY KEY,
+  person_id  INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_people_tenant ON people(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_events_person ON clock_events(person_id);
 CREATE INDEX IF NOT EXISTS idx_events_time   ON clock_events(clocked_at);
 `);
+
+// Additive migrations for profile fields (safe on existing databases).
+function addColumn(table, col, def) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (!cols.some((c) => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+}
+addColumn('people', 'email', "TEXT NOT NULL DEFAULT ''");
+addColumn('people', 'title', "TEXT NOT NULL DEFAULT ''");
+addColumn('people', 'bio', "TEXT NOT NULL DEFAULT ''");
+addColumn('people', 'photo', 'TEXT');
+addColumn('people', 'handle', 'TEXT');
+addColumn('people', 'pass_hash', 'TEXT');
+addColumn('people', 'must_change', 'INTEGER NOT NULL DEFAULT 0');
+addColumn('people', 'profile_updated_at', 'INTEGER');
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_people_handle ON people(handle) WHERE handle IS NOT NULL');
 
 // Seed a default tenant + the original board roster (only when empty).
 function seed() {
@@ -295,7 +318,7 @@ function serveStatic(res, urlPath) {
   const resolved = path.resolve(filePath);
   const pubRoot = path.resolve(PUBLIC_DIR);
   const assetsRoot = path.resolve(ASSETS_DIR);
-  if (!resolved.startsWith(pubRoot) && !resolved.startsWith(assetsRoot)) {
+  if (!resolved.startsWith(pubRoot + path.sep) && !resolved.startsWith(assetsRoot + path.sep)) {
     res.writeHead(403);
     return res.end('Forbidden');
   }
@@ -310,6 +333,8 @@ function serveStatic(res, urlPath) {
       'Content-Type': MIME[ext] || 'application/octet-stream',
       'X-Content-Type-Options': 'nosniff',
       'X-Frame-Options': 'DENY',
+      'Content-Security-Policy': "default-src 'self'; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+      'Referrer-Policy': 'same-origin',
       'Cache-Control': ext === '.html' ? 'no-store' : 'no-cache',
     });
     res.end(data);
@@ -325,15 +350,14 @@ function nowMs() {
 }
 
 function latestEventPerPerson() {
-  // Returns, for every active person, their most recent clock event (or null).
+  // One row per person: their most recent clock event (ties broken by id).
   return db.prepare(`
-    SELECT ce.*
-    FROM clock_events ce
-    JOIN (
-      SELECT person_id, MAX(clocked_at) AS mx
-      FROM clock_events
-      GROUP BY person_id
-    ) latest ON latest.person_id = ce.person_id AND latest.mx = ce.clocked_at
+    SELECT * FROM (
+      SELECT ce.*, ROW_NUMBER() OVER (
+        PARTITION BY ce.person_id ORDER BY ce.clocked_at DESC, ce.id DESC
+      ) AS rn
+      FROM clock_events ce
+    ) WHERE rn = 1
   `).all();
 }
 
@@ -360,7 +384,7 @@ function buildStatus(search, tenantId, matchPhone = true) {
   }
 
   const rows = db.prepare(`
-    SELECT p.id, p.name, p.phone, p.tenant_id, t.name AS tenant_name
+    SELECT p.id, p.name, p.phone, p.title, p.photo, p.tenant_id, t.name AS tenant_name
     FROM people p
     JOIN tenants t ON t.id = p.tenant_id
     WHERE ${clauses.join(' AND ')}
@@ -373,6 +397,8 @@ function buildStatus(search, tenantId, matchPhone = true) {
       id: r.id,
       name: r.name,
       phone: r.phone,
+      title: r.title,
+      photo_url: photoUrl(r.photo),
       tenant_id: r.tenant_id,
       tenant_name: r.tenant_name,
       status: last ? last.direction : 'none',
@@ -490,6 +516,145 @@ function filtersFrom(url) {
 }
 
 // ---------------------------------------------------------------------------
+// Profiles: photos, person accounts, validation
+// ---------------------------------------------------------------------------
+
+const MAX_PHOTO_BYTES = 2 * 1024 * 1024;
+const PERSON_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+
+function photoUrl(photo) { return photo ? `/photos/${photo}` : null; }
+
+function readRaw(req, limit) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > limit) { reject(new Error('Body too large')); req.destroy(); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+// Identify an image by its magic bytes (never trust the client's Content-Type; no SVG).
+function detectImageExt(buf) {
+  if (buf.length > 12 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return '.jpg';
+  if (buf.length > 12 && buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return '.png';
+  if (buf.length > 12 && buf.subarray(0, 4).toString('latin1') === 'RIFF' && buf.subarray(8, 12).toString('latin1') === 'WEBP') return '.webp';
+  return null;
+}
+
+function unlinkPhoto(name) {
+  if (name && /^[a-f0-9]{32}\.(jpg|png|webp)$/.test(name)) fs.rm(path.join(UPLOAD_DIR, name), { force: true }, () => {});
+}
+
+function setPhoto(personId, buf) {
+  const ext = detectImageExt(buf);
+  if (!ext) return { error: 'Photo must be a JPEG, PNG or WebP image' };
+  if (buf.length > MAX_PHOTO_BYTES) return { error: 'Photo is too large (max 2 MB)' };
+  const name = crypto.randomBytes(16).toString('hex') + ext;
+  fs.writeFileSync(path.join(UPLOAD_DIR, name), buf);
+  const old = db.prepare('SELECT photo FROM people WHERE id = ?').get(personId);
+  db.prepare('UPDATE people SET photo = ?, profile_updated_at = ? WHERE id = ?').run(name, nowMs(), personId);
+  unlinkPhoto(old && old.photo);
+  return { photo_url: photoUrl(name) };
+}
+
+function clearPhoto(personId) {
+  const old = db.prepare('SELECT photo FROM people WHERE id = ?').get(personId);
+  db.prepare('UPDATE people SET photo = NULL, profile_updated_at = ? WHERE id = ?').run(nowMs(), personId);
+  unlinkPhoto(old && old.photo);
+}
+
+function servePhoto(res, name) {
+  if (!/^[a-f0-9]{32}\.(jpg|png|webp)$/.test(name)) { res.writeHead(404); return res.end('Not found'); }
+  fs.readFile(path.join(UPLOAD_DIR, name), (err, data) => {
+    if (err) { res.writeHead(404); return res.end('Not found'); }
+    res.writeHead(200, {
+      'Content-Type': MIME[path.extname(name)] || 'application/octet-stream',
+      'Cache-Control': 'public, max-age=31536000, immutable', // filename changes on every upload
+      'X-Content-Type-Options': 'nosniff',
+    });
+    res.end(data);
+  });
+}
+
+// Validate the profile fields a person (or an admin) may set. Only keys present are returned.
+function cleanProfile(body) {
+  const out = {};
+  const limits = { title: 80, phone: 40, email: 120, bio: 600 };
+  for (const [k, max] of Object.entries(limits)) {
+    if (body[k] === undefined) continue;
+    const v = String(body[k] ?? '').trim();
+    if (v.length > max) return { error: `${k} must be ${max} characters or fewer` };
+    if (k === 'email' && v && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) return { error: 'Enter a valid email address' };
+    out[k] = v;
+  }
+  return { fields: out };
+}
+
+function updateProfileFields(personId, fields) {
+  const keys = Object.keys(fields);
+  if (!keys.length) return;
+  db.prepare(`UPDATE people SET ${keys.map((k) => `${k} = ?`).join(', ')}, profile_updated_at = ? WHERE id = ?`)
+    .run(...keys.map((k) => fields[k]), nowMs(), personId);
+}
+
+function profileRow(row) {
+  return {
+    id: row.id, name: row.name, tenant_id: row.tenant_id, tenant_name: row.tenant_name,
+    phone: row.phone, email: row.email, title: row.title, bio: row.bio,
+    photo_url: photoUrl(row.photo), handle: row.handle || null,
+    has_access: !!row.pass_hash, must_change: !!row.must_change, active: row.active,
+    profile_updated_at: row.profile_updated_at || null,
+  };
+}
+
+function getProfile(personId) {
+  const row = db.prepare(`
+    SELECT p.*, t.name AS tenant_name FROM people p JOIN tenants t ON t.id = p.tenant_id WHERE p.id = ?
+  `).get(personId);
+  return row ? profileRow(row) : null;
+}
+
+function makeHandle(name, personId) {
+  const base = String(name).toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '.').replace(/^\.+|\.+$/g, '').slice(0, 30) || 'user';
+  let candidate = base;
+  for (let i = 2; db.prepare('SELECT id FROM people WHERE handle = ? AND id != ?').get(candidate, personId); i++) candidate = `${base}${i}`;
+  return candidate;
+}
+
+// Person (non-admin) session, separate cookie from admin sessions.
+function currentPerson(req) {
+  const sid = parseCookies(req).psid;
+  if (!sid) return null;
+  const row = db.prepare(`
+    SELECT p.id, ps.expires_at FROM person_sessions ps JOIN people p ON p.id = ps.person_id
+    WHERE ps.token_hash = ? AND p.active = 1 AND p.pass_hash IS NOT NULL
+  `).get(sha256(sid));
+  if (!row) return null;
+  if (row.expires_at < nowMs()) { db.prepare('DELETE FROM person_sessions WHERE token_hash = ?').run(sha256(sid)); return null; }
+  return { id: row.id };
+}
+
+function requirePerson(res, req) {
+  const person = currentPerson(req);
+  if (!person) { sendJSON(res, 401, { error: 'Please sign in' }); return null; }
+  return person;
+}
+
+function personCookie(req, value, maxAgeSec) {
+  return `psid=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAgeSec}${isSecureReq(req) ? '; Secure' : ''}`;
+}
+
+// Photos must be removed from disk when their person rows are cascade-deleted.
+function photosForTenant(tenantId) {
+  return db.prepare('SELECT photo FROM people WHERE tenant_id = ? AND photo IS NOT NULL').all(tenantId).map((r) => r.photo);
+}
+
+// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
@@ -497,14 +662,20 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   // Normalise /api/<resource>/<numeric id> to /api/<resource>/:id for routing.
   const idMatch = url.pathname.match(/^\/api\/(tenants|people|events|admin\/users)\/(\d+)$/);
+  const subMatch = url.pathname.match(/^\/api\/people\/(\d+)\/(photo|access)$/);
   const route = idMatch
     ? `${req.method} /api/${idMatch[1]}/:id`
+    : subMatch ? `${req.method} /api/people/:id/${subMatch[2]}`
     : `${req.method} ${url.pathname}`;
-  const routeId = idMatch ? Number(idMatch[2]) : null;
+  const routeId = idMatch ? Number(idMatch[2]) : (subMatch ? Number(subMatch[1]) : null);
 
   try {
     // ---- Static files ------------------------------------------------------
+    if (req.method === 'GET' && url.pathname.startsWith('/photos/')) {
+      return servePhoto(res, url.pathname.slice('/photos/'.length));
+    }
     if (req.method === 'GET' && !url.pathname.startsWith('/api/')) {
+      if (url.pathname === '/me' || url.pathname === '/me/') return serveStatic(res, '/me.html');
       return serveStatic(res, url.pathname);
     }
 
@@ -595,12 +766,107 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, { ok: true });
     }
 
+    // ---- Admin: a person's photo & account access ----------------------------
+    if (route === 'PUT /api/people/:id/photo') {
+      if (!requireAdmin(res, req)) return;
+      if (!db.prepare('SELECT id FROM people WHERE id = ?').get(routeId)) return sendJSON(res, 404, { error: 'person not found' });
+      const r = setPhoto(routeId, await readRaw(req, MAX_PHOTO_BYTES + 1024));
+      return r.error ? sendJSON(res, 400, r) : sendJSON(res, 200, r);
+    }
+    if (route === 'DELETE /api/people/:id/photo') {
+      if (!requireAdmin(res, req)) return;
+      clearPhoto(routeId);
+      return sendJSON(res, 200, { ok: true });
+    }
+    if (route === 'POST /api/people/:id/access') {
+      // Create or reset a person's sign-in. Returns a one-time temporary password.
+      if (!requireAdmin(res, req)) return;
+      const person = db.prepare('SELECT id, name, handle FROM people WHERE id = ?').get(routeId);
+      if (!person) return sendJSON(res, 404, { error: 'person not found' });
+      const handle = person.handle || makeHandle(person.name, person.id);
+      const temp = crypto.randomBytes(9).toString('base64url');
+      db.prepare('UPDATE people SET handle = ?, pass_hash = ?, must_change = 1 WHERE id = ?').run(handle, hashPassword(temp), person.id);
+      db.prepare('DELETE FROM person_sessions WHERE person_id = ?').run(person.id);
+      return sendJSON(res, 200, { handle, temp_password: temp });
+    }
+    if (route === 'DELETE /api/people/:id/access') {
+      if (!requireAdmin(res, req)) return;
+      db.prepare('UPDATE people SET pass_hash = NULL, must_change = 0 WHERE id = ?').run(routeId);
+      db.prepare('DELETE FROM person_sessions WHERE person_id = ?').run(routeId);
+      return sendJSON(res, 200, { ok: true });
+    }
+
+    // ---- Person self-service (/me) -------------------------------------------
+    if (route === 'POST /api/me/login') {
+      const ip = 'p:' + clientIp(req);
+      if (throttled(ip)) return sendJSON(res, 429, { error: 'Too many attempts. Try again in a few minutes.' });
+      const body = await readBody(req);
+      const handle = String(body.handle || '').trim().toLowerCase();
+      const row = db.prepare('SELECT id, pass_hash, active FROM people WHERE handle = ?').get(handle);
+      const ok = verifyPassword(String(body.password || ''), row && row.pass_hash ? row.pass_hash : DUMMY_HASH)
+        && !!row && !!row.pass_hash && row.active === 1;
+      if (!ok) { noteFailure(ip); return sendJSON(res, 401, { error: 'Invalid sign-in or password' }); }
+      loginFails.delete(ip);
+      const token = crypto.randomBytes(32).toString('base64url');
+      const now = nowMs();
+      db.prepare('INSERT INTO person_sessions (token_hash, person_id, created_at, expires_at) VALUES (?, ?, ?, ?)')
+        .run(sha256(token), row.id, now, now + PERSON_SESSION_TTL_MS);
+      res.setHeader('Set-Cookie', personCookie(req, token, PERSON_SESSION_TTL_MS / 1000));
+      return sendJSON(res, 200, getProfile(row.id));
+    }
+    if (route === 'POST /api/me/logout') {
+      const sid = parseCookies(req).psid;
+      if (sid) db.prepare('DELETE FROM person_sessions WHERE token_hash = ?').run(sha256(sid));
+      res.setHeader('Set-Cookie', personCookie(req, '', 0));
+      return sendJSON(res, 200, { ok: true });
+    }
+    if (route === 'GET /api/me') {
+      const me = requirePerson(res, req); if (!me) return;
+      return sendJSON(res, 200, getProfile(me.id));
+    }
+    if (route === 'PUT /api/me') {
+      const me = requirePerson(res, req); if (!me) return;
+      const prof = cleanProfile(await readBody(req));
+      if (prof.error) return sendJSON(res, 400, { error: prof.error });
+      if (prof.fields.phone !== undefined) db.prepare('UPDATE people SET phone = ? WHERE id = ?').run(prof.fields.phone, me.id);
+      const { phone: _p, ...rest } = prof.fields;
+      updateProfileFields(me.id, rest);
+      return sendJSON(res, 200, getProfile(me.id));
+    }
+    if (route === 'PUT /api/me/photo') {
+      const me = requirePerson(res, req); if (!me) return;
+      const r = setPhoto(me.id, await readRaw(req, MAX_PHOTO_BYTES + 1024));
+      return r.error ? sendJSON(res, 400, r) : sendJSON(res, 200, r);
+    }
+    if (route === 'DELETE /api/me/photo') {
+      const me = requirePerson(res, req); if (!me) return;
+      clearPhoto(me.id);
+      return sendJSON(res, 200, { ok: true });
+    }
+    if (route === 'POST /api/me/password') {
+      const me = requirePerson(res, req); if (!me) return;
+      const body = await readBody(req);
+      const row = db.prepare('SELECT pass_hash FROM people WHERE id = ?').get(me.id);
+      if (!verifyPassword(String(body.current || ''), row.pass_hash)) return sendJSON(res, 400, { error: 'Current password is incorrect' });
+      const next = String(body.next || '');
+      if (next.length < 8) return sendJSON(res, 400, { error: 'New password must be at least 8 characters' });
+      db.prepare('UPDATE people SET pass_hash = ?, must_change = 0 WHERE id = ?').run(hashPassword(next), me.id);
+      db.prepare('DELETE FROM person_sessions WHERE person_id = ? AND token_hash != ?').run(me.id, sha256(parseCookies(req).psid));
+      return sendJSON(res, 200, { ok: true });
+    }
+    if (route === 'GET /api/me/shifts') {
+      const me = requirePerson(res, req); if (!me) return;
+      const sessions = buildSessions({ tenantId: null, personId: me.id, from: nowMs() - 30 * 86400000, to: Number.MAX_SAFE_INTEGER });
+      return sendJSON(res, 200, sessions.slice(0, 30).map(({ clock_in, clock_out, duration_ms, open }) => ({ clock_in, clock_out, duration_ms, open })));
+    }
+
     // ---- Public kiosk: search by name, then IN/OUT -------------------------
     if (route === 'GET /api/kiosk/search') {
       const q = (url.searchParams.get('q') || '').trim();
       if (!q) return sendJSON(res, 200, []);
       const rows = buildStatus(q.slice(0, 60), null, false).slice(0, 25).map((p) => ({
-        id: p.id, name: p.name, tenant_name: p.tenant_name, status: p.status, clocked_at: p.clocked_at,
+        id: p.id, name: p.name, tenant_name: p.tenant_name, title: p.title, photo_url: p.photo_url,
+        status: p.status, clocked_at: p.clocked_at,
       }));
       return sendJSON(res, 200, rows);
     }
@@ -636,7 +902,9 @@ const server = http.createServer(async (req, res) => {
       if (!requireAdmin(res, req)) return;
       const id = routeId;
       if (req.method === 'DELETE') {
+        const photos = photosForTenant(id);
         db.prepare('DELETE FROM tenants WHERE id = ?').run(id);
+        photos.forEach(unlinkPhoto);
         return sendJSON(res, 200, { ok: true });
       }
       const body = await readBody(req);
@@ -663,12 +931,19 @@ const server = http.createServer(async (req, res) => {
         params.push(Number(tenantId));
       }
       const rows = db.prepare(`
-        SELECT p.id, p.name, p.phone, p.tenant_id, p.active, t.name AS tenant_name
+        SELECT p.id, p.name, p.phone, p.email, p.title, p.photo, p.handle, p.tenant_id, p.active,
+               (p.pass_hash IS NOT NULL) AS has_access, t.name AS tenant_name
         FROM people p JOIN tenants t ON t.id = p.tenant_id
         WHERE ${clauses.join(' AND ')}
         ORDER BY t.name COLLATE NOCASE, p.name COLLATE NOCASE
       `).all(...params);
-      return sendJSON(res, 200, rows);
+      return sendJSON(res, 200, rows.map(({ photo, ...r }) => ({ ...r, photo_url: photoUrl(photo), has_access: !!r.has_access })));
+    }
+
+    if (route === 'GET /api/people/:id') {
+      if (!requireAdmin(res, req)) return;
+      const prof = getProfile(routeId);
+      return prof ? sendJSON(res, 200, prof) : sendJSON(res, 404, { error: 'person not found' });
     }
 
     if (route === 'POST /api/people') {
@@ -692,7 +967,9 @@ const server = http.createServer(async (req, res) => {
       if (!requireAdmin(res, req)) return;
       const id = routeId;
       if (req.method === 'DELETE') {
+        const old = db.prepare('SELECT photo FROM people WHERE id = ?').get(id);
         db.prepare('DELETE FROM people WHERE id = ?').run(id);
+        unlinkPhoto(old && old.photo);
         return sendJSON(res, 200, { ok: true });
       }
       const body = await readBody(req);
@@ -700,6 +977,9 @@ const server = http.createServer(async (req, res) => {
       if (!db.prepare('SELECT id FROM tenants WHERE id = ?').get(Number(body.tenant_id))) {
         return sendJSON(res, 400, { error: 'tenant_id does not exist' });
       }
+      const prof = cleanProfile(body);
+      if (prof.error) return sendJSON(res, 400, { error: prof.error });
+      const { phone: _ignored, ...profileOnly } = prof.fields; // phone is handled by the main UPDATE
       db.prepare('UPDATE people SET tenant_id = ?, name = ?, phone = ?, active = ? WHERE id = ?')
         .run(
           Number(body.tenant_id),
@@ -708,6 +988,7 @@ const server = http.createServer(async (req, res) => {
           body.active ? 1 : 0,
           id
         );
+      updateProfileFields(id, profileOnly);
       return sendJSON(res, 200, { ok: true });
     }
 

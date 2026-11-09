@@ -69,6 +69,17 @@ audit history is never overwritten.
 | GET/POST | `/api/admin/users` | List / add admin accounts | Admin |
 | DELETE | `/api/admin/users/:id` | Remove an admin (not yourself, not the last one) | Admin |
 | GET | `/api/status` | Current status of everyone incl. phone & notes (optional `?search=`, `?tenant_id=`) | Admin |
+| GET | `/api/people/:id` | Full profile of one person | Admin |
+| PUT/DELETE | `/api/people/:id/photo` | Upload (raw JPEG/PNG/WebP body, max 2 MB) / remove a person's photo | Admin |
+| POST | `/api/people/:id/access` | Create or reset a person's sign-in; returns `handle` + one-time `temp_password` | Admin |
+| DELETE | `/api/people/:id/access` | Turn a person's sign-in off (ends their sessions) | Admin |
+| POST | `/api/me/login` | Person signs in (`handle`, `password`); throttled like admin login | Public |
+| POST | `/api/me/logout` | Person signs out | Person |
+| GET/PUT | `/api/me` | Own profile: `title`, `phone`, `email`, `bio` (name and tenant are admin-only) | Person |
+| PUT/DELETE | `/api/me/photo` | Own photo | Person |
+| POST | `/api/me/password` | Change own password (`current`, `next`, min 8 chars) | Person |
+| GET | `/api/me/shifts` | Own shifts for the last 30 days | Person |
+| GET | `/photos/<file>` | Serve an uploaded photo (unguessable file names) | Public |
 | GET | `/api/events` | Clock-event history; filters `tenant_id`, `person_id`, `direction`, `from`, `to` (ms), `limit`, `offset`, `paged=1` | Admin |
 | GET | `/api/events.csv` | Same filters, CSV export | Admin |
 | POST | `/api/events` | Manual/corrected entry (`person_id`, `direction`, `clocked_at`, `notes`) | Admin |
@@ -94,6 +105,18 @@ audit history is never overwritten.
 - All tenant, people, status, event and report endpoints require a session. The kiosk can only search names (not phones) and clock IN/OUT.
 - Login is throttled, state-changing requests reject cross-origin `Origin` headers, and the old `ADMIN_TOKEN` is gone.
 - Behind HTTPS (recommended — e.g. a reverse proxy or Cloudflare tunnel) set `COOKIE_SECURE=1`, or `TRUST_PROXY=1` so `X-Forwarded-Proto/For` are honoured.
+
+## Profiles
+
+Everyone on the board can have a small profile that **they control** and **admins can see and edit**.
+
+- **Photo** — shows next to their name on the kiosk, the live board and the people list (coloured initials if there's no photo). Photos are centre-cropped, resized to 512 px and re-encoded in the browser (which also strips EXIF/location data), then checked on the server by file signature. Only JPEG/PNG/WebP up to 2 MB are accepted; SVG is refused. Files live in `data/uploads/`.
+- **Details** — job title, phone, email and a short bio.
+- **Their own page at `/me`** — sign in, change the photo and details, see their last 30 days of shifts, change their password.
+- **Access is opt-in.** An admin opens a person (the 👤 button on **People**) and clicks **Create sign-in**. That generates a sign-in name (e.g. `dana.whitfield`) and a one-time temporary password, shown once. On first sign-in the person must choose their own password (min 8 characters). **Reset password** issues a new temporary one; **Turn off sign-in** ends their access immediately but keeps the profile.
+- **Admins** can edit any profile field, upload or remove any photo, and manage sign-in access. People can't change their own name or tenant, and a person's session can never reach admin endpoints (separate cookie, separate checks).
+
+> Photos are served publicly by an unguessable file name, because the kiosk shows them to anyone standing at it. If that is too open for your site, tell your admins to leave photos off or put the kiosk behind your network/tunnel access rules.
 
 ## Admin dashboard
 
@@ -157,10 +180,13 @@ inout-board/
 ├── public/
 │   ├── index.html      # Public kiosk (search + IN/OUT)
 │   ├── kiosk.js
+│   ├── me.html         # Person profile page (served at /me)
+│   ├── me.js
+│   ├── shared.js       # Avatars + client-side photo resize/upload
 │   ├── admin.html      # Admin console shell (served at /admin)
 │   ├── app.js          # Admin console logic (login, board, tenants, people, log, admins)
 │   └── style.css
-└── data/               # SQLite DB (created at runtime, gitignored)
+└── data/               # SQLite DB + uploads/ photos (created at runtime, gitignored)
 ```
 
 ---
