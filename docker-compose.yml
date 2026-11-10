@@ -1,0 +1,37 @@
+# IN/OUT Board - docker compose
+#
+#   cp .env.example .env     # then edit ADMIN_USER / ADMIN_PASSWORD
+#   docker compose up -d
+#
+# Optional Cloudflare Tunnel (no open ports needed):
+#   set TUNNEL_TOKEN in .env, then:  docker compose --profile tunnel up -d
+#   (point the tunnel's public hostname at  http://app:3000 )
+
+services:
+  app:
+    build: .
+    image: ghcr.io/jmason84/inout-board:deploy
+    container_name: inout-board
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PORT: "3000"
+      DATA_DIR: /data
+    ports:
+      - "${HOST_PORT:-3000}:3000"
+    volumes:
+      - inout-data:/data
+
+  cloudflared:
+    profiles: ["tunnel"]
+    image: cloudflare/cloudflared:latest
+    container_name: inout-board-tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+    depends_on:
+      - app
+
+volumes:
+  inout-data:

@@ -208,6 +208,10 @@ inout-board/
 
 ---
 
+## Deploying
+
+See **[DEPLOY.md](DEPLOY.md)** for Docker, plain Node/systemd, Cloudflare Tunnel, HTTPS, backups/restore and upgrading. `docker compose up -d` is the quickest route. The `deploy` branch also carries a CI workflow (`npm test`) and a workflow that publishes a container image to GitHub Container Registry.
+
 ## Deployment notes
 
 The app is intentionally **self-contained and dependency-free** so it can run
