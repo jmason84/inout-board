@@ -232,3 +232,59 @@ label.btn { display: inline-block; }
 /* One-time credential notice (neutral, not an error) */
 .form-error.one-time { background: var(--accent-bg); color: var(--text); border: 1px solid var(--accent); margin-bottom: 12px; }
 .form-error.one-time code { background: var(--card); padding: 2px 8px; border-radius: 6px; }
+
+/* ================= People layouts ================= */
+.pgroup { margin: 22px 0 10px; font-size: 15px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+.pgroup:first-child { margin-top: 0; }
+.pl { display: grid; gap: 12px; }
+.pl.list { gap: 10px; }
+
+/* cards */
+.pl.cards { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; }
+.pcard { background: var(--card); border: 1px solid var(--border); border-top: 6px solid var(--border); border-radius: var(--radius); padding: 18px 14px 16px; display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; box-shadow: var(--shadow); }
+.pcard.in { border-top-color: var(--in); } .pcard.out { border-top-color: var(--out); }
+.pcard .pname { font-size: 19px; font-weight: 700; margin-top: 4px; overflow-wrap: anywhere; }
+.pcard .pmeta { color: var(--muted); font-size: 13px; min-height: 16px; }
+.pcard .btn.block { width: 100%; margin-top: 6px; }
+
+/* tiles */
+.pl.tiles { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 14px; }
+.tile { border: 0; border-radius: 18px; padding: 20px 12px; min-height: 160px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: #fff; font-family: inherit; text-align: center; background: #6a737d; box-shadow: var(--shadow); }
+button.tile { cursor: pointer; transition: transform .08s ease, filter .15s; }
+button.tile:hover { filter: brightness(1.08); } button.tile:active { transform: scale(.97); } button.tile:disabled { opacity: .6; }
+.tile.in { background: var(--in); } .tile.out { background: var(--out); }
+.tile .avatar { border: 3px solid rgba(255,255,255,.85); }
+.tile .tname { font-size: 18px; font-weight: 700; overflow-wrap: anywhere; }
+.tile .tstat { font-size: 12px; opacity: .92; text-transform: uppercase; letter-spacing: .04em; }
+
+/* board (classic in/out board, grouped by tenant) */
+.pboard { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 16px; overflow: hidden; box-shadow: var(--shadow); }
+.pboard > h3 { padding: 12px 16px; background: var(--bg); border-bottom: 1px solid var(--border); font-size: 15px; display: flex; justify-content: space-between; gap: 8px; }
+.pboard tr.row-in td:first-child { box-shadow: inset 5px 0 0 var(--in); }
+.pboard tr.row-out td:first-child { box-shadow: inset 5px 0 0 var(--out); }
+.io-col { text-align: center; width: 84px; }
+.io { min-width: 62px; padding: 8px 12px; border-radius: 8px; border: 2px solid var(--border); background: var(--card); color: var(--muted); font-weight: 700; font-size: 13px; font-family: inherit; cursor: pointer; }
+.io.in:not(.on):hover { border-color: var(--in); color: var(--in); } .io.out:not(.on):hover { border-color: var(--out); color: var(--out); }
+.io.in.on { background: var(--in); border-color: var(--in); color: #fff; } .io.out.on { background: var(--out); border-color: var(--out); color: #fff; }
+.io:disabled { cursor: default; }
+.dot { display: inline-block; width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--border); }
+.dot.in.on { background: var(--in); border-color: var(--in); } .dot.out.on { background: var(--out); border-color: var(--out); }
+
+/* kiosk gets more room for the wider layouts */
+.kiosk.wide { max-width: 1100px; }
+.kiosk .pcard .pname { font-size: 21px; } .kiosk .tile .tname { font-size: 20px; }
+.kiosk .io { padding: 14px 18px; font-size: 15px; min-width: 76px; }
+.kiosk .pboard td, .kiosk .pboard th { padding: 12px 14px; }
+
+/* settings option cards */
+.opt-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-top: 12px; }
+.opt { display: flex; gap: 10px; align-items: flex-start; border: 2px solid var(--border); border-radius: 12px; padding: 14px; cursor: pointer; background: var(--card); }
+.opt.selected { border-color: var(--accent); background: var(--accent-bg); }
+.opt input { margin-top: 4px; }
+.opt-body { display: grid; gap: 4px; }
+.opt-body a { color: var(--accent); }
+
+@media (max-width: 800px) {
+  .seg { flex-wrap: wrap; }
+  #boardLayout { margin-left: 0; }
+}

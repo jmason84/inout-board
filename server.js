@@ -87,6 +87,11 @@ CREATE TABLE IF NOT EXISTS person_sessions (
   expires_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_people_tenant ON people(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_events_person ON clock_events(person_id);
 CREATE INDEX IF NOT EXISTS idx_events_time   ON clock_events(clocked_at);
@@ -655,6 +660,24 @@ function photosForTenant(tenantId) {
 }
 
 // ---------------------------------------------------------------------------
+// Settings (admin-controlled, whitelisted)
+// ---------------------------------------------------------------------------
+
+const SETTING_DEFAULTS = { kiosk_layout: 'list', kiosk_mode: 'search' };
+const SETTING_OPTIONS = {
+  kiosk_layout: ['list', 'cards', 'tiles', 'board'],
+  kiosk_mode: ['search', 'browse'],
+};
+
+function getSettings() {
+  const out = { ...SETTING_DEFAULTS };
+  for (const r of db.prepare('SELECT key, value FROM settings').all()) {
+    if (SETTING_OPTIONS[r.key] && SETTING_OPTIONS[r.key].includes(r.value)) out[r.key] = r.value;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
@@ -860,11 +883,33 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, sessions.slice(0, 30).map(({ clock_in, clock_out, duration_ms, open }) => ({ clock_in, clock_out, duration_ms, open })));
     }
 
+    // ---- Settings ------------------------------------------------------------
+    if (route === 'GET /api/kiosk/config') {
+      const st = getSettings();
+      return sendJSON(res, 200, { layout: st.kiosk_layout, mode: st.kiosk_mode });
+    }
+    if (route === 'GET /api/admin/settings') {
+      if (!requireAdmin(res, req)) return;
+      return sendJSON(res, 200, getSettings());
+    }
+    if (route === 'PUT /api/admin/settings') {
+      if (!requireAdmin(res, req)) return;
+      const body = await readBody(req);
+      const up = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
+      for (const [k, v] of Object.entries(body)) {
+        if (!SETTING_OPTIONS[k]) return sendJSON(res, 400, { error: `Unknown setting: ${k}` });
+        if (!SETTING_OPTIONS[k].includes(v)) return sendJSON(res, 400, { error: `Invalid value for ${k}` });
+        up.run(k, v);
+      }
+      return sendJSON(res, 200, getSettings());
+    }
+
     // ---- Public kiosk: search by name, then IN/OUT -------------------------
     if (route === 'GET /api/kiosk/search') {
       const q = (url.searchParams.get('q') || '').trim();
-      if (!q) return sendJSON(res, 200, []);
-      const rows = buildStatus(q.slice(0, 60), null, false).slice(0, 25).map((p) => ({
+      const browse = getSettings().kiosk_mode === 'browse';
+      if (!q && !browse) return sendJSON(res, 200, []);
+      const rows = buildStatus(q.slice(0, 60), null, false).slice(0, q ? 25 : 300).map((p) => ({
         id: p.id, name: p.name, tenant_name: p.tenant_name, title: p.title, photo_url: p.photo_url,
         status: p.status, clocked_at: p.clocked_at,
       }));

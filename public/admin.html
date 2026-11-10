@@ -37,6 +37,7 @@
           <button class="side-link" data-admin="people">People</button>
           <button class="side-link" data-admin="log">Time Log</button>
           <button class="side-link" data-admin="admins">Admins</button>
+          <button class="side-link" data-admin="settings">Settings</button>
         </aside>
 
         <div class="admin-content">
@@ -69,9 +70,24 @@
               <input type="search" id="boardSearch" class="search" placeholder="Filter by name, phone or tenant…" />
               <select id="boardTenant" class="select"><option value="">All tenants</option></select>
               <button class="btn" id="refreshBoard">Refresh</button>
+              <div class="seg" id="boardLayout" role="group" aria-label="Layout"></div>
             </div>
             <div class="summary" id="boardSummary"></div>
             <div id="boardBody" class="status-board"></div>
+          </div>
+
+          <!-- Settings -->
+          <div class="admin-page" id="admin-settings">
+            <div class="page-head"><h2>Settings</h2><a class="btn" href="/" target="_blank" rel="noopener">Open kiosk ↗</a></div>
+            <div class="card">
+              <h3>Kiosk layout</h3>
+              <p class="hint">How people appear on the sign-in screen. You can also set it per tablet by adding <code>?layout=tiles</code> to that tablet's address.</p>
+              <div class="opt-grid" id="layoutOpts"></div>
+            </div>
+            <div class="card">
+              <h3>What the kiosk shows</h3>
+              <div class="opt-grid" id="modeOpts"></div>
+            </div>
           </div>
 
           <!-- Admins -->

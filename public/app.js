@@ -164,7 +164,7 @@ $('#logoutBtn').addEventListener('click', async () => {
 });
 
 let currentAdminPage = 'overview';
-const adminLoaders = { overview: loadOverview, board: loadBoard, tenants: loadTenantCards, people: loadPeople, log: loadLog, admins: loadAdmins };
+const adminLoaders = { overview: loadOverview, board: loadBoard, tenants: loadTenantCards, people: loadPeople, log: loadLog, admins: loadAdmins, settings: loadSettings };
 
 function showAdminPage(name) {
   currentAdminPage = name;
@@ -465,8 +465,25 @@ $('#manualEntryBtn').addEventListener('click', async () => {
 // ADMIN: live board (full detail, auto-refresh)
 // ---------------------------------------------------------------------------
 
+let boardLayout = 'list';
+try { const v = localStorage.getItem('inout_board_layout'); if (IO.LAYOUTS.some((l) => l.id === v)) boardLayout = v; } catch { /* ignore */ }
+
+function paintLayoutSwitch() {
+  $('#boardLayout').innerHTML = IO.LAYOUTS.map((l) =>
+    `<button class="seg-btn ${l.id === boardLayout ? 'active' : ''}" data-layout="${l.id}" title="${escapeHtml(l.desc)}">${l.label}</button>`).join('');
+}
+$('#boardLayout').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-layout]');
+  if (!b) return;
+  boardLayout = b.dataset.layout;
+  try { localStorage.setItem('inout_board_layout', boardLayout); } catch { /* ignore */ }
+  paintLayoutSwitch();
+  loadBoard().catch(() => {});
+});
+
 async function loadBoard() {
   await refreshTenantsCache();
+  paintLayoutSwitch();
   const sel = $('#boardTenant');
   if (!sel.dataset.filled || sel.options.length !== tenantsCache.length + 1) {
     const cur = sel.value;
@@ -477,25 +494,15 @@ async function loadBoard() {
   if ($('#boardSearch').value.trim()) qs.set('search', $('#boardSearch').value.trim());
   if (sel.value) qs.set('tenant_id', sel.value);
   const people = await json(await adminFetch(`/api/status?${qs}`));
-  let inCount = 0;
-  const byTenant = new Map();
-  for (const p of people) {
-    if (p.status === 'in') inCount++;
-    if (!byTenant.has(p.tenant_name)) byTenant.set(p.tenant_name, []);
-    byTenant.get(p.tenant_name).push(p);
-  }
+  const inCount = people.filter((p) => p.status === 'in').length;
   $('#boardSummary').innerHTML = `
     <div class="sum-stat in">IN <b>${inCount}</b></div>
     <div class="sum-stat out">OUT <b>${people.length - inCount}</b></div>
     <div class="sum-stat">Total <b>${people.length}</b></div>`;
   $('#boardUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) + ' · auto-refreshes';
-  $('#boardBody').innerHTML = people.length ? [...byTenant.entries()].map(([tenant, rows]) => `
-    <div class="tenant-group"><h3>${escapeHtml(tenant)}</h3>
-      <div class="table-wrap"><table>
-        <thead><tr><th>Name</th><th>Phone</th><th>Status</th><th>Last clock</th><th>Notes</th></tr></thead>
-        <tbody>${rows.map((p) => `<tr><td><div class="name-cell">${IO.avatar(p.name, p.photo_url, 'sm')}<b>${escapeHtml(p.name)}</b></div></td><td>${escapeHtml(p.phone || '—')}</td>
-          <td>${badge(p.status)}</td><td>${fmtTime(p.clocked_at)}</td><td>${escapeHtml(p.notes || '')}</td></tr>`).join('')}</tbody>
-      </table></div></div>`).join('') : '<p class="hint center">No people found.</p>';
+  $('#boardBody').innerHTML = people.length
+    ? IO.renderPeople(people, boardLayout, { detail: true, group: true })
+    : '<p class="hint center">No people found.</p>';
 }
 $('#boardSearch').addEventListener('input', debounce(() => loadBoard().catch(() => {}), 200));
 $('#boardTenant').addEventListener('change', () => loadBoard().catch(() => {}));
@@ -623,6 +630,34 @@ $('#profForm').addEventListener('submit', async (e) => {
 });
 $('#profClose').addEventListener('click', closeProfile);
 $('#profBack').addEventListener('click', (e) => { if (e.target === $('#profBack')) closeProfile(); });
+
+// ---------------------------------------------------------------------------
+// ADMIN: settings (kiosk layout + mode)
+// ---------------------------------------------------------------------------
+
+const MODES = [
+  { id: 'search', label: 'Search only', desc: 'Staff type their name to find themselves. Nobody else is shown. Best for privacy.' },
+  { id: 'browse', label: 'Show everyone', desc: 'The whole roster is visible on the kiosk, grouped by tenant, and stays up to date. Faster to tap, but anyone at the screen sees who works here (and their photo).' },
+];
+
+async function loadSettings() {
+  const st = await json(await adminFetch('/api/admin/settings'));
+  const radio = (name, items, value) => items.map((o) => `
+    <label class="opt ${o.id === value ? 'selected' : ''}">
+      <input type="radio" name="${name}" value="${o.id}" ${o.id === value ? 'checked' : ''} />
+      <span class="opt-body"><b>${escapeHtml(o.label)}</b><span class="mini">${escapeHtml(o.desc)}</span>
+      ${name === 'kiosk_layout' ? `<a class="mini" href="/?layout=${o.id}" target="_blank" rel="noopener">Preview ↗</a>` : ''}</span>
+    </label>`).join('');
+  $('#layoutOpts').innerHTML = radio('kiosk_layout', IO.LAYOUTS, st.kiosk_layout);
+  $('#modeOpts').innerHTML = radio('kiosk_mode', MODES, st.kiosk_mode);
+}
+
+$('#admin-settings').addEventListener('change', async (e) => {
+  const input = e.target.closest('input[type=radio]');
+  if (!input) return;
+  const res = await adminFetch('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ [input.name]: input.value }) });
+  if (res.ok) { toast('Saved'); loadSettings(); } else toast((await json(res)).error || 'Could not save', true);
+});
 
 // ---------------------------------------------------------------------------
 // Init

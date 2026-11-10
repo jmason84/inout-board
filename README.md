@@ -61,7 +61,9 @@ audit history is never overwritten.
 | PUT | `/api/people/:id` | Edit person | Admin |
 | DELETE | `/api/people/:id` | Delete person | Admin |
 | POST | `/api/clock` | Clock a person in/out (`person_id`, `direction`); `409` if already in that state | Public (kiosk) |
-| GET | `/api/kiosk/search?q=` | Kiosk name/tenant search; returns only id, name, tenant, status (no phone numbers); empty query returns nothing | Public (kiosk) |
+| GET | `/api/kiosk/search?q=` | Kiosk name/tenant search; returns only id, name, title, tenant, photo, status (no phone numbers); an empty query returns nothing unless the kiosk is set to *Show everyone* | Public (kiosk) |
+| GET | `/api/kiosk/config` | Kiosk layout and mode | Public (kiosk) |
+| GET/PUT | `/api/admin/settings` | Read / change `kiosk_layout` (`list`/`cards`/`tiles`/`board`) and `kiosk_mode` (`search`/`browse`) | Admin |
 | POST | `/api/auth/login` | Sign in (`username`, `password`) → HttpOnly session cookie; throttled to 8 failures / 15 min / IP | Public |
 | POST | `/api/auth/logout` | End the session | Session |
 | GET | `/api/auth/me` | Current admin | Session |
@@ -117,6 +119,21 @@ Everyone on the board can have a small profile that **they control** and **admin
 - **Admins** can edit any profile field, upload or remove any photo, and manage sign-in access. People can't change their own name or tenant, and a person's session can never reach admin endpoints (separate cookie, separate checks).
 
 > Photos are served publicly by an unguessable file name, because the kiosk shows them to anyone standing at it. If that is too open for your site, tell your admins to leave photos off or put the kiosk behind your network/tunnel access rules.
+
+## Layouts
+
+The people on the board can be shown four ways. Pick what suits each screen:
+
+| Layout | Looks like | Good for |
+|--------|-----------|----------|
+| **List** | One compact row per person | Small screens, simple setups |
+| **Cards** | Photo-forward cards in a grid | Recognising people by face |
+| **Tiles** | Big colour-coded tiles; the whole tile is the button | Wall tablets and touch screens |
+| **Board** | Classic in/out board grouped by tenant, with IN and OUT columns | Anyone used to the paper board |
+
+- **Kiosk:** an admin chooses the layout under **Settings**, and can also choose **Search only** (staff type their name; nobody else is shown) or **Show everyone** (the roster is visible and stays current, grouped by tenant). Add `?layout=tiles` (or `cards`, `board`, `list`) to a tablet's address to override the layout for just that device.
+- **Admin Live Board:** a List / Cards / Tiles / Board switch in the toolbar. Each admin's choice is remembered in their browser.
+- **Show everyone** exposes names and photos to anyone at the kiosk, so leave it on Search only if that matters at your site.
 
 ## Admin dashboard
 
