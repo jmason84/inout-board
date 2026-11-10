@@ -162,6 +162,7 @@ docker compose start app
 ## Health check and troubleshooting
 
 - `GET /api/health` returns `{"ok":true}`. Docker uses it for its healthcheck.
+- **"Cross-origin request blocked" when signing in:** you are behind a proxy/tunnel on an old version. Update to the latest code (it uses the browser's `Sec-Fetch-Site` header). If an unusual proxy still strips it, set `TRUST_PROXY=1` and/or `ALLOWED_ORIGINS=https://your.public.address`.
 - **Can't sign in:** wrong address scheme with `COOKIE_SECURE=1` (see above), or you were throttled (8 failed tries in 15 minutes per address; wait or restart the app).
 - **Lost the admin password and have no other admin:** stop the app, run the SQLite statement `DELETE FROM admin_users;` against `inout.sqlite` (the sqlite3 CLI, or any SQLite tool), then start with a new `ADMIN_PASSWORD`. A fresh admin is created on start.
 - **Photos don't show after a restore:** the `uploads/` folder wasn't restored alongside the database.

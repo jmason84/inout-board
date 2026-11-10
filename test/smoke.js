@@ -68,6 +68,20 @@ async function t(name, fn) {
   await t('cross-origin writes are blocked', async () => {
     const r = await call('POST', '/api/tenants', { name: 'x' }, { headers: { Origin: 'http://evil.example' } });
     assert.equal(r.status, 403);
+    // modern browsers: Sec-Fetch-Site decides, regardless of what Host the proxy forwards
+    assert.equal((await call('POST', '/api/tenants', { name: 'x' }, { headers: { Origin: 'https://board.example.com', 'Sec-Fetch-Site': 'cross-site' } })).status, 403);
+    assert.equal((await call('POST', '/api/tenants', { name: 'x' }, { headers: { Origin: 'https://board.example.com', 'Sec-Fetch-Site': 'same-site' } })).status, 403);
+  });
+
+  await t('behind a proxy: same-origin browser writes still work', async () => {
+    // Public URL differs from the internal Host the app sees (Cloudflare tunnel case).
+    const ok = await call('POST', '/api/auth/login', { username: 'tester', password: PASS },
+      { jar: false, headers: { Origin: 'https://board.example.com', 'Sec-Fetch-Site': 'same-origin' } });
+    assert.equal(ok.status, 200);
+    // Older clients without Sec-Fetch-Site: Origin vs Host fails (403) unless proxy trust is configured.
+    const old = await call('POST', '/api/auth/login', { username: 'tester', password: PASS },
+      { jar: false, headers: { Origin: 'https://board.example.com' } });
+    assert.equal(old.status, 403);
   });
 
   let tenantId, personId;

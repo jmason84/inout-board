@@ -301,10 +301,24 @@ setInterval(() => {
 }, 60 * 60 * 1000).unref();
 
 // Cookie auth needs a CSRF guard on state-changing requests.
+// Behind a proxy or tunnel (Cloudflare, nginx...) the Host header the app sees is the
+// internal one, so we can't just compare Origin to Host. Order of checks:
+//   1. Sec-Fetch-Site (sent by every modern browser, set by the browser, not by page script):
+//      allow same-origin / none, block same-site siblings and cross-site.
+//   2. Otherwise compare Origin to Host, to X-Forwarded-Host (only when TRUST_PROXY=1),
+//      and to any ALLOWED_ORIGINS (comma-separated) the admin configured.
 function sameOrigin(req) {
+  const site = req.headers['sec-fetch-site'];
+  if (site) return site === 'same-origin' || site === 'none';
   const origin = req.headers.origin;
-  if (!origin) return true; // non-browser clients / same-origin GET navigations
-  try { return new URL(origin).host === req.headers.host; } catch { return false; }
+  if (!origin) return true; // non-browser clients
+  let originHost;
+  try { originHost = new URL(origin).host; } catch { return false; }
+  const hosts = [req.headers.host];
+  if (TRUST_PROXY) hosts.push(String(req.headers['x-forwarded-host'] || '').split(',')[0].trim());
+  const extra = String(process.env.ALLOWED_ORIGINS || '').split(',').map((v) => v.trim()).filter(Boolean)
+    .map((v) => { try { return new URL(v).host; } catch { return v; } });
+  return hosts.includes(originHost) || extra.includes(originHost);
 }
 
 function serveStatic(res, urlPath) {
