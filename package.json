@@ -6,7 +6,12 @@
   "type": "commonjs",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "test": "node test/smoke.js",
+    "backup": "node scripts/backup.js",
+    "seed:demo": "node scripts/seed-demo.js",
+    "screenshots": "node scripts/screenshots.js",
+    "build:pages": "node scripts/build-pages.js"
   },
   "engines": {
     "node": ">=22.5.0"

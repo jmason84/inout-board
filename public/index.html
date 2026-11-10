@@ -4,103 +4,53 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>IN/OUT Board</title>
+  <script src="/prefs.js"></script>
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
+  <a class="skip" href="#directory">Skip to the list of people</a>
+
   <header class="topbar">
-    <div class="brand">
-      <span class="brand-dot"></span>
-      <h1>IN/OUT Board</h1>
-    </div>
-    <nav class="tabs" id="tabs">
-      <button class="tab active" data-view="clock">Clock In/Out</button>
-      <button class="tab" data-view="status">Status Board</button>
-      <button class="tab" data-view="admin">Admin</button>
+    <div class="brand"><span class="brand-dot" aria-hidden="true"></span><h1>IN/OUT Board</h1></div>
+    <nav class="head-tools" aria-label="Site">
+      <div class="seg" role="group" aria-label="Text size">
+        <button type="button" class="seg-btn" data-size="" aria-pressed="true" aria-label="Normal text size">A</button>
+        <button type="button" class="seg-btn" data-size="large" aria-pressed="false" aria-label="Large text size">A+</button>
+        <button type="button" class="seg-btn" data-size="xlarge" aria-pressed="false" aria-label="Extra large text size">A++</button>
+      </div>
+      <a class="tab" href="/me">My profile</a>
+      <a class="tab" href="/admin">Admin</a>
     </nav>
-    <div class="clock" id="headerClock"></div>
+    <div class="clock" id="clock" aria-hidden="true"></div>
   </header>
 
-  <main>
-    <!-- CLOCK VIEW -->
-    <section id="view-clock" class="view active">
-      <div class="search-wrap">
-        <input
-          type="text"
-          id="clockSearch"
-          class="search"
-          placeholder="Search all tenants and people…"
-          autocomplete="off"
-          autofocus
-        />
+  <main class="home" id="main">
+    <h2 class="sr-only">Who is in and who is out</h2>
+
+    <section class="controls" aria-label="Find and filter people">
+      <div>
+        <label for="q" class="sr-only">Search by person or company</label>
+        <input type="search" id="q" class="search big" placeholder="Search by name or company…" autocomplete="off" />
       </div>
-      <div class="hint">Search across <em>all</em> tenants. Tap a person to clock them <strong>in</strong> or <strong>out</strong>.</div>
-      <div id="clockResults" class="card-list"></div>
+      <div class="control-row">
+        <div class="seg" role="group" aria-label="Show">
+          <button type="button" class="seg-btn" data-status="" aria-pressed="true">Everyone</button>
+          <button type="button" class="seg-btn" data-status="in" aria-pressed="false">In</button>
+          <button type="button" class="seg-btn" data-status="out" aria-pressed="false">Out</button>
+        </div>
+        <div class="seg" role="group" aria-label="Layout" id="layoutSwitch"></div>
+      </div>
+      <nav aria-label="Companies"><div class="chips" id="tenantChips"></div></nav>
     </section>
 
-    <!-- STATUS VIEW -->
-    <section id="view-status" class="view">
-      <div class="toolbar">
-        <input type="text" id="statusSearch" class="search" placeholder="Filter status board…" autocomplete="off" />
-        <select id="statusTenant" class="select">
-          <option value="">All tenants</option>
-        </select>
-        <button id="refreshStatus" class="btn">Refresh</button>
-      </div>
-      <div class="summary" id="statusSummary"></div>
-      <div id="statusBoard" class="status-board"></div>
-    </section>
+    <div class="summary" id="summary" role="status" aria-live="polite"></div>
+    <div id="directory"></div>
 
-    <!-- ADMIN VIEW -->
-    <section id="view-admin" class="view">
-      <div class="admin-gate" id="adminGate">
-        <div class="card">
-          <h2>Admin access</h2>
-          <p>Enter the admin token configured on the server (<code>ADMIN_TOKEN</code>).</p>
-          <input type="password" id="adminToken" class="search" placeholder="Admin token" />
-          <button id="adminUnlock" class="btn primary">Unlock</button>
-        </div>
-      </div>
-      <div class="admin-panel" id="adminPanel" hidden>
-        <div class="admin-grid">
-          <div class="card">
-            <h2>Tenants</h2>
-            <div id="tenantList" class="item-list"></div>
-            <form id="tenantForm" class="inline-form">
-              <input type="text" id="tenantName" class="search" placeholder="New tenant name" />
-              <input type="text" id="tenantNotes" class="search" placeholder="Notes (optional)" />
-              <button type="submit" class="btn primary">Add tenant</button>
-            </form>
-          </div>
-          <div class="card">
-            <h2>People</h2>
-            <form id="personForm" class="inline-form">
-              <select id="personTenant" class="select"></select>
-              <input type="text" id="personName" class="search" placeholder="Full name" />
-              <input type="text" id="personPhone" class="search" placeholder="Phone (optional)" />
-              <button type="submit" class="btn primary">Add person</button>
-            </form>
-            <div id="personList" class="item-list"></div>
-          </div>
-        </div>
-        <div class="card">
-          <h2>Recent clock events</h2>
-          <button id="refreshEvents" class="btn">Refresh</button>
-          <button id="resetAll" class="btn danger">Clock everyone OUT (end of day)</button>
-          <div class="table-wrap">
-            <table class="events-table">
-              <thead>
-                <tr><th>Time</th><th>Person</th><th>Tenant</th><th>Action</th><th>Notes</th></tr>
-              </thead>
-              <tbody id="eventsBody"></tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    </section>
+    <p class="foot"><a href="/me">Update my profile</a><a href="/admin">Admin sign in</a></p>
   </main>
 
-  <div id="toast" class="toast" hidden></div>
-
-  <script src="/app.js"></script>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <script src="/shared.js"></script>
+  <script src="/home.js"></script>
 </body>
 </html>

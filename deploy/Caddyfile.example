@@ -1,0 +1,6 @@
+# HTTPS reverse proxy with automatic certificates (https://caddyserver.com).
+# Set TRUST_PROXY=1 and COOKIE_SECURE=1 for the app when using this.
+board.example.com {
+	encode gzip
+	reverse_proxy 127.0.0.1:3000
+}
