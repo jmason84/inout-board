@@ -3,119 +3,108 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>IN/OUT Board — Admin</title>
+  <title>Admin - IN/OUT Board</title>
+  <script src="/prefs.js"></script>
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
+  <a class="skip" href="#adminMain">Skip to content</a>
+
   <header class="topbar">
-    <div class="brand"><span class="brand-dot"></span><h1>IN/OUT Board</h1></div>
-    <nav class="tabs"><a class="tab" href="/" target="_blank" rel="noopener">Open kiosk ↗</a></nav>
-    <div class="clock" id="headerClock"></div>
-    <div class="acct" id="acct" hidden><span id="acctName"></span><button class="btn" id="logoutBtn">Sign out</button></div>
+    <div class="brand"><span class="brand-dot" aria-hidden="true"></span><h1>IN/OUT Board <span class="mini">Admin</span></h1></div>
+    <nav class="tabs" aria-label="Site"><a class="tab" href="/" target="_blank" rel="noopener">Open the board<span class="sr-only"> (opens in a new tab)</span> &#8599;</a></nav>
+    <div class="clock" id="headerClock" aria-hidden="true"></div>
+    <div class="head-tools" id="acct" hidden><span id="acctName"></span><button type="button" class="btn sm" id="logoutBtn">Sign out</button></div>
   </header>
 
-  <main>
-    <!-- ADMIN VIEW -->
+  <main id="adminMain">
     <section id="view-admin" class="view active">
       <div class="admin-gate" id="adminGate">
         <div class="card gate-card">
           <h2>Admin sign in</h2>
           <form id="loginForm">
-            <label class="field"><span>Username</span><input id="loginUser" class="search" autocomplete="username" required /></label>
+            <label class="field"><span>Username</span><input id="loginUser" class="search" autocomplete="username" autocapitalize="none" spellcheck="false" required /></label>
             <label class="field"><span>Password</span><input id="loginPass" type="password" class="search" autocomplete="current-password" required /></label>
-            <div class="form-error" id="loginError" hidden></div>
+            <div class="form-error" id="loginError" role="alert" hidden></div>
             <button type="submit" class="btn primary block">Sign in</button>
           </form>
         </div>
       </div>
 
       <div class="admin-shell" id="adminPanel" hidden>
-        <aside class="sidebar">
-          <button class="side-link active" data-admin="overview">Overview</button>
-          <button class="side-link" data-admin="board">Live Board</button>
-          <button class="side-link" data-admin="tenants">Tenants</button>
-          <button class="side-link" data-admin="people">People</button>
-          <button class="side-link" data-admin="log">Time Log</button>
-          <button class="side-link" data-admin="admins">Admins</button>
-          <button class="side-link" data-admin="settings">Settings</button>
-        </aside>
+        <nav class="sidebar" aria-label="Admin sections">
+          <button type="button" class="side-link active" data-admin="overview" aria-current="page">Overview</button>
+          <button type="button" class="side-link" data-admin="board">Live Board</button>
+          <button type="button" class="side-link" data-admin="tenants">Tenants</button>
+          <button type="button" class="side-link" data-admin="people">People</button>
+          <button type="button" class="side-link" data-admin="log">Time Log</button>
+          <button type="button" class="side-link" data-admin="admins">Admins</button>
+          <button type="button" class="side-link" data-admin="settings">Settings</button>
+        </nav>
 
         <div class="admin-content">
           <!-- Overview -->
           <div class="admin-page active" id="admin-overview">
-            <div class="page-head"><h2>Overview</h2><button class="btn" id="refreshOverview">Refresh</button></div>
+            <div class="page-head"><h2>Overview</h2><button type="button" class="btn" id="refreshOverview">Refresh</button></div>
             <div class="stat-grid" id="overviewStats"></div>
             <div class="card">
-              <div class="card-head"><h3>Tenants at a glance</h3></div>
+              <h3>Tenants at a glance</h3>
               <div class="table-wrap"><table>
-                <thead><tr><th>Tenant</th><th>People</th><th>IN</th><th>OUT</th><th>Time today</th></tr></thead>
+                <caption class="sr-only">Tenants and who is in</caption>
+                <thead><tr><th scope="col">Tenant</th><th scope="col">People</th><th scope="col">In</th><th scope="col">Out</th><th scope="col">Time today</th></tr></thead>
                 <tbody id="overviewTenants"></tbody>
               </table></div>
             </div>
             <div class="card">
-              <div class="card-head"><h3>Recent activity</h3></div>
+              <h3>Recent activity</h3>
               <div id="overviewRecent" class="feed"></div>
             </div>
             <div class="card danger-zone">
-              <div class="card-head"><h3>End of day</h3></div>
+              <h3>End of day</h3>
               <p class="hint">Clock out everyone who is still IN. Each gets an "End-of-day reset" OUT event.</p>
-              <button class="btn danger" id="resetAll">Clock everyone OUT</button>
+              <button type="button" class="btn danger" id="resetAll">Clock everyone OUT</button>
             </div>
           </div>
 
           <!-- Live board -->
           <div class="admin-page" id="admin-board">
-            <div class="page-head"><h2>Live Board</h2><span class="mini" id="boardUpdated"></span></div>
+            <div class="page-head"><h2>Live Board</h2><span class="mini" id="boardUpdated" role="status"></span></div>
             <div class="toolbar">
+              <label class="sr-only" for="boardSearch">Filter by name, phone or tenant</label>
               <input type="search" id="boardSearch" class="search" placeholder="Filter by name, phone or tenant…" />
+              <label class="sr-only" for="boardTenant">Tenant</label>
               <select id="boardTenant" class="select"><option value="">All tenants</option></select>
-              <button class="btn" id="refreshBoard">Refresh</button>
+              <button type="button" class="btn" id="refreshBoard">Refresh</button>
               <div class="seg" id="boardLayout" role="group" aria-label="Layout"></div>
             </div>
             <div class="summary" id="boardSummary"></div>
-            <div id="boardBody" class="status-board"></div>
-          </div>
-
-          <!-- Settings -->
-          <div class="admin-page" id="admin-settings">
-            <div class="page-head"><h2>Settings</h2><a class="btn" href="/" target="_blank" rel="noopener">Open kiosk ↗</a></div>
-            <div class="card">
-              <h3>Kiosk layout</h3>
-              <p class="hint">How people appear on the sign-in screen. You can also set it per tablet by adding <code>?layout=tiles</code> to that tablet's address.</p>
-              <div class="opt-grid" id="layoutOpts"></div>
-            </div>
-            <div class="card">
-              <h3>What the kiosk shows</h3>
-              <div class="opt-grid" id="modeOpts"></div>
-            </div>
-          </div>
-
-          <!-- Admins -->
-          <div class="admin-page" id="admin-admins">
-            <div class="page-head"><h2>Admins</h2>
-              <div class="btn-row"><button class="btn" id="changePwBtn">Change my password</button><button class="btn primary" id="addAdminBtn">+ Add admin</button></div>
-            </div>
-            <div class="card"><div class="table-wrap"><table>
-              <thead><tr><th>Username</th><th>Created</th><th>Last sign-in</th><th></th></tr></thead>
-              <tbody id="adminsBody"></tbody>
-            </table></div></div>
+            <div id="boardBody"></div>
           </div>
 
           <!-- Tenants -->
           <div class="admin-page" id="admin-tenants">
-            <div class="page-head"><h2>Tenants</h2><button class="btn primary" id="addTenantBtn">+ Add tenant</button></div>
+            <div class="page-head"><h2>Tenants</h2><button type="button" class="btn primary" id="addTenantBtn">+ Add tenant</button></div>
             <div id="tenantCards" class="tenant-grid"></div>
           </div>
 
           <!-- People -->
           <div class="admin-page" id="admin-people">
-            <div class="page-head"><h2>People</h2><button class="btn primary" id="addPersonBtn">+ Add person</button></div>
+            <div class="page-head">
+              <h2>People</h2>
+              <div class="btn-row">
+                <button type="button" class="btn" id="bulkVisBtn">Visibility for many&hellip;</button>
+                <button type="button" class="btn primary" id="addPersonBtn">+ Add person</button>
+              </div>
+            </div>
             <div class="toolbar">
+              <label class="sr-only" for="peopleSearch">Search people</label>
               <input type="search" id="peopleSearch" class="search" placeholder="Search people…" />
+              <label class="sr-only" for="peopleTenant">Tenant</label>
               <select id="peopleTenant" class="select"><option value="">All tenants</option></select>
             </div>
             <div class="card"><div class="table-wrap"><table>
-              <thead><tr><th>Name</th><th>Tenant</th><th>Phone</th><th>Status</th><th>Active</th><th></th></tr></thead>
+              <caption class="sr-only">People</caption>
+              <thead><tr><th scope="col">Name</th><th scope="col">Tenant</th><th scope="col">Shown publicly</th><th scope="col">Status</th><th scope="col">Active</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
               <tbody id="peopleBody"></tbody>
             </table></div></div>
           </div>
@@ -125,11 +114,12 @@
             <div class="page-head">
               <h2>Time Log</h2>
               <div class="btn-row">
-                <button class="btn" id="manualEntryBtn">+ Manual entry</button>
-                <button class="btn" id="exportCsv">Export CSV</button>
+                <button type="button" class="btn" id="manualEntryBtn">+ Manual entry</button>
+                <button type="button" class="btn" id="exportCsv">Export CSV</button>
               </div>
             </div>
             <div class="card filters">
+              <label class="sr-only" for="logRange">Date range</label>
               <select id="logRange" class="select">
                 <option value="today">Today</option>
                 <option value="yesterday">Yesterday</option>
@@ -139,17 +129,45 @@
                 <option value="all">All time</option>
                 <option value="custom">Custom…</option>
               </select>
-              <input type="date" id="logFrom" class="select" hidden />
-              <input type="date" id="logTo" class="select" hidden />
+              <label class="sr-only" for="logFrom">From date</label><input type="date" id="logFrom" class="select" hidden />
+              <label class="sr-only" for="logTo">To date</label><input type="date" id="logTo" class="select" hidden />
+              <label class="sr-only" for="logTenant">Tenant</label>
               <select id="logTenant" class="select"><option value="">All tenants</option></select>
+              <label class="sr-only" for="logPerson">Person</label>
               <select id="logPerson" class="select"><option value="">All people</option></select>
-              <div class="seg">
-                <button class="seg-btn active" data-logview="sessions">Shifts</button>
-                <button class="seg-btn" data-logview="events">Raw events</button>
+              <div class="seg" role="group" aria-label="View">
+                <button type="button" class="seg-btn active" data-logview="sessions" aria-pressed="true">Shifts</button>
+                <button type="button" class="seg-btn" data-logview="events" aria-pressed="false">Raw events</button>
               </div>
             </div>
             <div class="summary" id="logSummary"></div>
             <div class="card"><div class="table-wrap"><table id="logTable"></table></div></div>
+          </div>
+
+          <!-- Admins -->
+          <div class="admin-page" id="admin-admins">
+            <div class="page-head"><h2>Admins</h2>
+              <div class="btn-row"><button type="button" class="btn" id="changePwBtn">Change my password</button><button type="button" class="btn primary" id="addAdminBtn">+ Add admin</button></div>
+            </div>
+            <div class="card"><div class="table-wrap"><table>
+              <caption class="sr-only">Admin accounts</caption>
+              <thead><tr><th scope="col">Username</th><th scope="col">Created</th><th scope="col">Last sign-in</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+              <tbody id="adminsBody"></tbody>
+            </table></div></div>
+          </div>
+
+          <!-- Settings -->
+          <div class="admin-page" id="admin-settings">
+            <div class="page-head"><h2>Settings</h2><a class="btn" href="/" target="_blank" rel="noopener">Open the board<span class="sr-only"> (opens in a new tab)</span> &#8599;</a></div>
+            <div class="card">
+              <h3>Default layout</h3>
+              <p class="hint">How people appear on the public board until a visitor picks their own layout. Add <code>?layout=tiles</code> to a tablet's address to force a layout on that device.</p>
+              <div class="opt-grid" id="layoutOpts"></div>
+            </div>
+            <div class="card">
+              <h3>What the board shows</h3>
+              <div class="opt-grid" id="modeOpts"></div>
+            </div>
           </div>
         </div>
       </div>
@@ -158,7 +176,7 @@
 
   <!-- Generic modal -->
   <div class="modal-back" id="modalBack" hidden>
-    <div class="modal" role="dialog" aria-modal="true">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
       <h3 id="modalTitle"></h3>
       <form id="modalForm"><div id="modalFields"></div>
         <div class="modal-actions">
@@ -177,27 +195,39 @@
         <div>
           <h3 id="profTitle"></h3>
           <div class="mini" id="profSub"></div>
-          
+          <div class="btn-row">
+            <label class="btn sm">Upload photo<input type="file" id="profFile" accept="image/*" /></label>
+            <button type="button" class="btn sm" id="profPhotoRemove">Remove photo</button>
+          </div>
         </div>
       </div>
-      <div class="btn-row">
-        <label class="btn">Upload photo<input type="file" id="profFile" accept="image/*" hidden /></label>
-        <button class="btn" id="profPhotoRemove">Remove photo</button>
-      </div>
       <form id="profForm" class="prof-form">
+        <fieldset>
+          <legend>Picture shown next to their name</legend>
+          <div class="opt-grid" id="pfAvatarOpts"></div>
+        </fieldset>
         <label class="field"><span>Job title / role</span><input id="pfTitle" class="search" maxlength="80" /></label>
-        <label class="field"><span>Phone</span><input id="pfPhone" class="search" maxlength="40" /></label>
+        <label class="field"><span>Office / suite</span><input id="pfOffice" class="search" maxlength="80" /></label>
+        <label class="field"><span>Phone</span><input id="pfPhone" class="search" maxlength="40" inputmode="tel" /></label>
         <label class="field"><span>Email</span><input id="pfEmail" type="email" class="search" maxlength="120" /></label>
         <label class="field"><span>Bio</span><textarea id="pfBio" class="search" rows="3" maxlength="600"></textarea></label>
-        <div class="form-error" id="pfError" hidden></div>
+        <fieldset>
+          <legend>Shown on the public board</legend>
+          <label class="check"><input type="checkbox" id="pfVisOffice" /> <span>Office / suite</span></label>
+          <label class="check"><input type="checkbox" id="pfVisPhone" /> <span>Phone number</span></label>
+          <label class="check"><input type="checkbox" id="pfVisEmail" /> <span>Email address</span></label>
+          <p class="hint">The person can change these themselves at <code>/me</code>. Name, title, picture and status are always shown.</p>
+        </fieldset>
+        <label class="check"><input type="checkbox" id="pfManager" /> <span>Tenant manager: can edit their company's logo and details</span></label>
+        <div class="form-error" id="pfError" role="alert" hidden></div>
         <button type="submit" class="btn primary">Save profile</button>
       </form>
       <div class="access-box" id="accessBox"></div>
-      <div class="modal-actions"><button class="btn" id="profClose">Close</button></div>
+      <div class="modal-actions"><button type="button" class="btn" id="profClose">Close</button></div>
     </div>
   </div>
 
-  <div id="toast" class="toast" hidden></div>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
   <script src="/shared.js"></script>
   <script src="/app.js"></script>
 </body>

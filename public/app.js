@@ -58,36 +58,58 @@ function toLocalInput(ms) {
 // ---------------------------------------------------------------------------
 
 // fields: [{name,label,type,value,options,required,placeholder}]; resolves to values or null.
+// Keyboard handling shared by both dialogs: Escape closes, Tab stays inside, focus returns to the opener.
+function trapKeys(container, onEscape) {
+  const handler = (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); onEscape(); return; }
+    if (e.key !== 'Tab') return;
+    const items = [...container.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]):not([type=hidden]), select, textarea, [tabindex="0"]')]
+      .filter((el) => el.offsetParent !== null || el === document.activeElement);
+    if (!items.length) return;
+    const first = items[0], last = items[items.length - 1];
+    if (e.shiftKey && (document.activeElement === first || !container.contains(document.activeElement))) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  };
+  document.addEventListener('keydown', handler);
+  return () => document.removeEventListener('keydown', handler);
+}
+
 function openModal(title, fields, okLabel = 'Save') {
   return new Promise((resolve) => {
+    const opener = document.activeElement;
     $('#modalTitle').textContent = title;
     $('#modalOk').textContent = okLabel;
     $('#modalFields').innerHTML = fields.map((f) => {
       const id = `mf_${f.name}`;
+      if (f.type === 'hidden') return `<p>${escapeHtml(f.label)}</p><input type="hidden" id="${id}" value="" />`;
+      if (f.type === 'checkbox') {
+        return `<div class="field"><span>${escapeHtml(f.label)}</span><label class="check"><input type="checkbox" id="${id}" ${f.value ? 'checked' : ''}/> <span>${escapeHtml(f.checkLabel || '')}</span></label></div>`;
+      }
       let input;
       if (f.type === 'select') {
         input = `<select id="${id}" class="select">${f.options.map((o) =>
           `<option value="${escapeHtml(o.value)}" ${String(o.value) === String(f.value) ? 'selected' : ''}>${escapeHtml(o.label)}</option>`).join('')}</select>`;
-      } else if (f.type === 'checkbox') {
-        input = `<label class="check"><input type="checkbox" id="${id}" ${f.value ? 'checked' : ''}/> ${escapeHtml(f.checkLabel || '')}</label>`;
       } else if (f.type === 'textarea') {
         input = `<textarea id="${id}" class="search" rows="3" placeholder="${escapeHtml(f.placeholder || '')}">${escapeHtml(f.value || '')}</textarea>`;
       } else {
-        input = `<input id="${id}" class="search" type="${f.type || 'text'}" value="${escapeHtml(f.value ?? '')}" placeholder="${escapeHtml(f.placeholder || '')}" ${f.required ? 'required' : ''}/>`;
+        input = `<input id="${id}" class="search" type="${f.type || 'text'}" value="${escapeHtml(f.value ?? '')}" placeholder="${escapeHtml(f.placeholder || '')}" ${f.required ? 'required' : ''} ${f.autocomplete ? `autocomplete="${f.autocomplete}"` : ''}/>`;
       }
-      return `<label class="field"><span>${escapeHtml(f.label)}</span>${input}</label>`;
+      return `<label class="field"><span>${escapeHtml(f.label)}</span>${input}${f.hint ? `<span class="hint">${escapeHtml(f.hint)}</span>` : ''}</label>`;
     }).join('');
     const back = $('#modalBack');
     back.hidden = false;
-    const first = $('#modalFields input, #modalFields select, #modalFields textarea');
-    if (first) first.focus();
+    // Focus the first real field; for plain confirmations focus Cancel so Enter can't delete by accident.
+    ($('#modalFields input:not([type=hidden]), #modalFields select, #modalFields textarea') || $('#modalCancel')).focus();
 
     const form = $('#modalForm');
+    let untrap = () => {};
     const close = (val) => {
       back.hidden = true;
-      form.onsubmit = null; $('#modalCancel').onclick = null; back.onclick = null; document.onkeydown = null;
+      form.onsubmit = null; $('#modalCancel').onclick = null; back.onclick = null; untrap();
+      if (opener && opener.focus && document.contains(opener)) opener.focus();
       resolve(val);
     };
+    untrap = trapKeys(back, () => close(null));
     form.onsubmit = (e) => {
       e.preventDefault();
       const out = {};
@@ -99,7 +121,6 @@ function openModal(title, fields, okLabel = 'Save') {
     };
     $('#modalCancel').onclick = () => close(null);
     back.onclick = (e) => { if (e.target === back) close(null); };
-    document.onkeydown = (e) => { if (e.key === 'Escape') close(null); };
   });
 }
 
@@ -122,6 +143,7 @@ tickClock();
 let boardTimer = null;
 
 function showLogin(msg) {
+  setTimeout(() => { const u = $('#loginUser'); if (u && !$('#adminGate').hidden) u.focus(); }, 0);
   $('#adminGate').hidden = false;
   $('#adminPanel').hidden = true;
   $('#acct').hidden = true;
@@ -168,7 +190,11 @@ const adminLoaders = { overview: loadOverview, board: loadBoard, tenants: loadTe
 
 function showAdminPage(name) {
   currentAdminPage = name;
-  $$('.side-link[data-admin]').forEach((b) => b.classList.toggle('active', b.dataset.admin === name));
+  $$('.side-link[data-admin]').forEach((b) => {
+    const on = b.dataset.admin === name;
+    b.classList.toggle('active', on);
+    if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+  });
   $$('.admin-page').forEach((p) => p.classList.toggle('active', p.id === `admin-${name}`));
   clearInterval(boardTimer);
   if (name === 'board') boardTimer = setInterval(() => loadBoard().catch(() => {}), 30000);
@@ -226,18 +252,27 @@ $('#resetAll').addEventListener('click', async () => {
 // ADMIN: tenants
 // ---------------------------------------------------------------------------
 
+function tenantMetaHtml(t) {
+  const bits = [t.office, t.phone, t.email, t.website].filter(Boolean).map((v) => `<span>${escapeHtml(v)}</span>`);
+  return bits.length ? `<div class="tenant-meta">${bits.join('')}</div>` : '';
+}
+
+let tenantRows = [];
 async function loadTenantCards() {
   const d = await json(await adminFetch(`/api/admin/overview?day_start=${dayStart()}`));
   await refreshTenantsCache();
-  $('#tenantCards').innerHTML = d.tenants.map((t) => `
-    <div class="card tenant-card">
+  const full = new Map(tenantsCache.map((t) => [t.id, t]));
+  tenantRows = d.tenants.map((o) => ({ ...full.get(o.id), ...o }));
+  $('#tenantCards').innerHTML = tenantRows.map((t) => `
+    <article class="card tenant-card" aria-labelledby="tc-${t.id}">
       <div class="tenant-top">
-        <h3>${escapeHtml(t.name)}</h3>
+        <div class="name-cell">${t.logo_url ? `<img class="avatar lg logo" src="${escapeHtml(t.logo_url)}" alt="" />` : IO.avatar(t.name, null, 'lg')}<h3 id="tc-${t.id}">${escapeHtml(t.name)}</h3></div>
         <div class="btn-row">
-          <button class="icon-btn" data-edit-tenant="${t.id}" title="Edit">✎</button>
-          <button class="icon-btn danger" data-del-tenant="${t.id}" title="Delete">✕</button>
+          <button type="button" class="icon-btn" data-edit-tenant="${t.id}" aria-label="Edit ${escapeHtml(t.name)}" title="Edit">✎</button>
+          <button type="button" class="icon-btn danger" data-del-tenant="${t.id}" aria-label="Delete ${escapeHtml(t.name)}" title="Delete">✕</button>
         </div>
       </div>
+      ${tenantMetaHtml(t)}
       <p class="mini">${escapeHtml(t.notes || 'No notes')}</p>
       <div class="tenant-stats">
         <div><b>${t.people}</b><span>people</span></div>
@@ -245,21 +280,39 @@ async function loadTenantCards() {
         <div class="out"><b>${t.out_count}</b><span>out</span></div>
         <div><b>${fmtDuration(t.today_ms)}</b><span>today</span></div>
       </div>
-      <button class="btn block" data-view-log="${t.id}">View time log →</button>
-    </div>`).join('') || '<p class="hint">No tenants yet. Add your first one.</p>';
+      <div class="btn-row">
+        <label class="btn sm">${t.logo_url ? 'Change logo' : 'Upload logo'}<span class="sr-only"> for ${escapeHtml(t.name)}</span><input type="file" accept="image/*" data-logo-tenant="${t.id}" /></label>
+        ${t.logo_url ? `<button type="button" class="btn sm" data-logo-remove="${t.id}" aria-label="Remove logo for ${escapeHtml(t.name)}">Remove logo</button>` : ''}
+        <button type="button" class="btn sm" data-view-log="${t.id}">Time log →</button>
+      </div>
+    </article>`).join('') || '<p class="hint">No tenants yet. Add your first one.</p>';
 
-  $$('[data-edit-tenant]').forEach((b) => b.addEventListener('click', () => editTenant(d.tenants.find((t) => t.id === Number(b.dataset.editTenant)))));
-  $$('[data-del-tenant]').forEach((b) => b.addEventListener('click', () => deleteTenant(d.tenants.find((t) => t.id === Number(b.dataset.delTenant)))));
+  $$('[data-edit-tenant]').forEach((b) => b.addEventListener('click', () => editTenant(tenantRows.find((t) => t.id === Number(b.dataset.editTenant)))));
+  $$('[data-del-tenant]').forEach((b) => b.addEventListener('click', () => deleteTenant(tenantRows.find((t) => t.id === Number(b.dataset.delTenant)))));
   $$('[data-view-log]').forEach((b) => b.addEventListener('click', () => {
     $('#logTenant').value = b.dataset.viewLog; $('#logPerson').value = '';
     showAdminPage('log');
+  }));
+  $$('[data-logo-tenant]').forEach((inp) => inp.addEventListener('change', async () => {
+    const file = inp.files[0]; inp.value = '';
+    if (!file) return;
+    try { await IO.uploadImage(`/api/tenants/${inp.dataset.logoTenant}/logo`, file, 'logo'); toast('Logo updated'); loadTenantCards(); }
+    catch (err) { toast(err.message, true); }
+  }));
+  $$('[data-logo-remove]').forEach((b) => b.addEventListener('click', async () => {
+    const res = await adminFetch(`/api/tenants/${b.dataset.logoRemove}/logo`, { method: 'DELETE' });
+    if (res.ok) { toast('Logo removed'); loadTenantCards(); } else toast('Failed', true);
   }));
 }
 
 async function editTenant(t) {
   const v = await openModal(t ? 'Edit tenant' : 'Add tenant', [
     { name: 'name', label: 'Tenant name', value: t?.name, required: true },
-    { name: 'notes', label: 'Notes', type: 'textarea', value: t?.notes, placeholder: 'Location, contact, anything useful' },
+    { name: 'office', label: 'Office / suite', value: t?.office, placeholder: 'For example: Suite 204' },
+    { name: 'phone', label: 'Company phone', value: t?.phone, autocomplete: 'off' },
+    { name: 'email', label: 'Company email', type: 'email', value: t?.email },
+    { name: 'website', label: 'Website', value: t?.website, placeholder: 'example.com' },
+    { name: 'notes', label: 'Private notes (admins only)', type: 'textarea', value: t?.notes },
   ], t ? 'Save' : 'Add tenant');
   if (!v) return;
   const res = await adminFetch(t ? `/api/tenants/${t.id}` : '/api/tenants', {
@@ -282,6 +335,12 @@ async function deleteTenant(t) {
 
 let peopleCache = [];
 
+function sharedSummary(p) {
+  const shown = [p.show_office && p.office ? 'Office' : '', p.show_phone && p.phone ? 'Phone' : '', p.show_email && p.email ? 'Email' : ''].filter(Boolean);
+  const pic = p.avatar_mode === 'logo' ? 'company logo' : p.avatar_mode === 'initials' ? 'initials' : 'photo';
+  return `${shown.length ? shown.join(', ') : 'Name only'}<div class="mini">Picture: ${pic}</div>`;
+}
+
 async function loadPeople() {
   await refreshTenantsCache();
   const qs = new URLSearchParams();
@@ -295,14 +354,16 @@ async function loadPeople() {
   peopleCache = people;
   $('#peopleBody').innerHTML = people.map((p) => `
     <tr class="${p.active ? '' : 'inactive'}">
-      <td><div class="name-cell">${IO.avatar(p.name, p.photo_url, 'sm')}<div><b>${escapeHtml(p.name)}</b>${p.title ? `<div class="mini">${escapeHtml(p.title)}</div>` : ''}</div></div></td><td>${escapeHtml(p.tenant_name)}</td><td>${escapeHtml(p.phone || '—')}</td>
+      <td><div class="name-cell">${IO.avatar(p.name, p.avatar_url, 'sm', p.avatar_kind)}<div><strong>${escapeHtml(p.name)}</strong>${p.title ? `<div class="mini">${escapeHtml(p.title)}</div>` : ''}</div></div></td>
+      <td>${escapeHtml(p.tenant_name)}${p.office ? `<div class="mini">${escapeHtml(p.office)}</div>` : ''}</td>
+      <td>${sharedSummary(p)}</td>
       <td>${p.active ? badge(st.get(p.id) || 'none') : '<span class="mini">inactive</span>'}</td>
       <td>${p.active ? 'Yes' : 'No'}</td>
       <td class="actions">
-        <button class="icon-btn" data-profile-person="${p.id}" title="Profile & photo">👤</button>
-        <button class="icon-btn" data-edit-person="${p.id}" title="Edit">✎</button>
-        <button class="icon-btn" data-log-person="${p.id}" title="Time log">⏱</button>
-        <button class="icon-btn danger" data-del-person="${p.id}" title="Delete">✕</button>
+        <button type="button" class="icon-btn" data-profile-person="${p.id}" aria-label="Profile, picture and visibility for ${escapeHtml(p.name)}" title="Profile & visibility">👤</button>
+        <button type="button" class="icon-btn" data-edit-person="${p.id}" aria-label="Edit ${escapeHtml(p.name)}" title="Edit">✎</button>
+        <button type="button" class="icon-btn" data-log-person="${p.id}" aria-label="Time log for ${escapeHtml(p.name)}" title="Time log">⏱</button>
+        <button type="button" class="icon-btn danger" data-del-person="${p.id}" aria-label="Delete ${escapeHtml(p.name)}" title="Delete">✕</button>
       </td></tr>`).join('') || '<tr><td colspan="6" class="hint">No people found.</td></tr>';
 
   $$('[data-profile-person]').forEach((b) => b.addEventListener('click', () => openProfile(Number(b.dataset.profilePerson))));
@@ -328,7 +389,7 @@ async function editPerson(p) {
     { name: 'tenant_id', label: 'Tenant', type: 'select', value: p?.tenant_id ?? $('#peopleTenant').value,
       options: tenantsCache.map((t) => ({ value: t.id, label: t.name })) },
     { name: 'phone', label: 'Phone', value: p?.phone, placeholder: 'Optional' },
-    ...(p ? [{ name: 'active', label: 'Status', type: 'checkbox', value: !!p.active, checkLabel: 'Active (shows on the clock screen)' }] : []),
+    ...(p ? [{ name: 'active', label: 'Status', type: 'checkbox', value: !!p.active, checkLabel: 'Active (shows on the board)' }] : []),
   ], p ? 'Save' : 'Add person');
   if (!v) return;
   v.tenant_id = Number(v.tenant_id);
@@ -337,6 +398,22 @@ async function editPerson(p) {
   if (res.ok) { toast(p ? 'Person updated' : 'Person added'); loadPeople(); }
   else toast((await json(res)).error || 'Failed', true);
 }
+
+$('#bulkVisBtn').addEventListener('click', async () => {
+  await refreshTenantsCache();
+  const v = await openModal('Visibility for many people', [
+    { name: 'field', label: 'What to change', type: 'select', value: 'show_phone', options: [
+      { value: 'show_phone', label: 'Phone numbers' }, { value: 'show_email', label: 'Email addresses' }, { value: 'show_office', label: 'Office / suite' }] },
+    { name: 'value', label: 'Set to', type: 'select', value: 'true', options: [
+      { value: 'true', label: 'Shown on the public board' }, { value: 'false', label: 'Hidden' }] },
+    { name: 'tenant_id', label: 'Who', type: 'select', value: '', options: [
+      { value: '', label: 'Everyone, in every tenant' }, ...tenantsCache.map((t) => ({ value: t.id, label: 'Everyone at ' + t.name }))] },
+  ], 'Apply');
+  if (!v) return;
+  const res = await adminFetch('/api/admin/visibility', { method: 'POST', body: JSON.stringify({
+    field: v.field, value: v.value === 'true', tenant_id: v.tenant_id ? Number(v.tenant_id) : undefined }) });
+  if (res.ok) { toast(`Updated ${(await json(res)).updated} people`); loadPeople(); } else toast('Failed', true);
+});
 $('#addPersonBtn').addEventListener('click', () => editPerson(null));
 $('#peopleSearch').addEventListener('input', debounce(() => loadPeople().catch(() => {}), 200));
 $('#peopleTenant').addEventListener('change', () => loadPeople().catch(() => {}));
@@ -429,7 +506,7 @@ async function loadLog() {
 $('#logTenant').addEventListener('change', () => { $('#logPerson').value = ''; loadLog().catch(() => {}); });
 $$('[data-logview]').forEach((b) => b.addEventListener('click', () => {
   logView = b.dataset.logview;
-  $$('[data-logview]').forEach((x) => x.classList.toggle('active', x === b));
+  $$('[data-logview]').forEach((x) => { x.classList.toggle('active', x === b); x.setAttribute('aria-pressed', String(x === b)); });
   loadLog().catch(() => {});
 }));
 
@@ -465,12 +542,12 @@ $('#manualEntryBtn').addEventListener('click', async () => {
 // ADMIN: live board (full detail, auto-refresh)
 // ---------------------------------------------------------------------------
 
-let boardLayout = 'list';
+let boardLayout = 'table';
 try { const v = localStorage.getItem('inout_board_layout'); if (IO.LAYOUTS.some((l) => l.id === v)) boardLayout = v; } catch { /* ignore */ }
 
 function paintLayoutSwitch() {
   $('#boardLayout').innerHTML = IO.LAYOUTS.map((l) =>
-    `<button class="seg-btn ${l.id === boardLayout ? 'active' : ''}" data-layout="${l.id}" title="${escapeHtml(l.desc)}">${l.label}</button>`).join('');
+    `<button type="button" class="seg-btn" data-layout="${l.id}" aria-pressed="${l.id === boardLayout}" title="${escapeHtml(l.desc)}">${l.label}</button>`).join('');
 }
 $('#boardLayout').addEventListener('click', (e) => {
   const b = e.target.closest('[data-layout]');
@@ -479,6 +556,7 @@ $('#boardLayout').addEventListener('click', (e) => {
   try { localStorage.setItem('inout_board_layout', boardLayout); } catch { /* ignore */ }
   paintLayoutSwitch();
   loadBoard().catch(() => {});
+  $(`#boardLayout [data-layout="${boardLayout}"]`).focus();
 });
 
 async function loadBoard() {
@@ -496,12 +574,13 @@ async function loadBoard() {
   const people = await json(await adminFetch(`/api/status?${qs}`));
   const inCount = people.filter((p) => p.status === 'in').length;
   $('#boardSummary').innerHTML = `
-    <div class="sum-stat in">IN <b>${inCount}</b></div>
-    <div class="sum-stat out">OUT <b>${people.length - inCount}</b></div>
-    <div class="sum-stat">Total <b>${people.length}</b></div>`;
-  $('#boardUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) + ' · auto-refreshes';
+    <span class="sum-stat in">In <b>${inCount}</b></span>
+    <span class="sum-stat out">Out <b>${people.length - inCount}</b></span>
+    <span class="sum-stat">Total <b>${people.length}</b></span>`;
+  $('#boardUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) + ' · refreshes every 30 seconds';
+  // Admins see everything on the live board, regardless of what a person shows publicly.
   $('#boardBody').innerHTML = people.length
-    ? IO.renderPeople(people, boardLayout, { detail: true, group: true })
+    ? IO.renderGroups(IO.groupFlat(people, new Map(tenantsCache.map((t) => [t.id, t]))), boardLayout, { detail: true })
     : '<p class="hint center">No people found.</p>';
 }
 $('#boardSearch').addEventListener('input', debounce(() => loadBoard().catch(() => {}), 200));
@@ -552,29 +631,43 @@ $('#changePwBtn').addEventListener('click', async () => {
 
 let profId = null;
 let profData = null;
+let profOpener = null;
+let profUntrap = () => {};
 
 function closeProfile() {
   $('#profBack').hidden = true;
   profId = null;
+  profUntrap();
+  if (profOpener && profOpener.focus && document.contains(profOpener)) profOpener.focus();
   if (currentAdminPage === 'people') loadPeople().catch(() => {});
 }
 
 function paintProfile() {
   const p = profData;
-  $('#profAvatar').innerHTML = IO.avatar(p.name, p.photo_url, 'xl');
+  $('#profAvatar').innerHTML = IO.avatar(p.name, p.avatar_url, 'xl', p.avatar_kind);
   $('#profTitle').textContent = p.name;
   $('#profSub').textContent = `${p.tenant_name}${p.active ? '' : ' · inactive'}`;
   $('#profPhotoRemove').hidden = !p.photo_url;
-  $('#pfTitle').value = p.title; $('#pfPhone').value = p.phone; $('#pfEmail').value = p.email; $('#pfBio').value = p.bio;
+  const opts = [
+    { v: 'photo', label: 'Their photo', desc: p.photo_url ? 'The uploaded photo.' : 'No photo uploaded yet.', pic: IO.avatar(p.name, p.photo_url, 'md') },
+    { v: 'logo', label: 'Company logo', desc: p.tenant.logo_url ? `${p.tenant.name}'s logo.` : 'This tenant has no logo yet.', pic: IO.avatar(p.tenant.name, p.tenant.logo_url, 'md', 'logo'), disabled: !p.tenant.logo_url },
+    { v: 'initials', label: 'Initials only', desc: 'A coloured circle.', pic: IO.avatar(p.name, null, 'md') },
+  ];
+  $('#pfAvatarOpts').innerHTML = opts.map((o) => `
+    <label class="opt"><input type="radio" name="pf_avatar_mode" value="${o.v}" ${o.v === p.avatar_mode ? 'checked' : ''} ${o.disabled ? 'disabled' : ''} />
+      <span class="opt-body"><span class="name-cell">${o.pic}<b>${o.label}</b></span><span class="mini">${escapeHtml(o.desc)}</span></span></label>`).join('');
+  $('#pfTitle').value = p.title; $('#pfOffice').value = p.office; $('#pfPhone').value = p.phone; $('#pfEmail').value = p.email; $('#pfBio').value = p.bio;
+  $('#pfVisOffice').checked = p.show_office; $('#pfVisPhone').checked = p.show_phone; $('#pfVisEmail').checked = p.show_email;
+  $('#pfManager').checked = p.is_manager;
   $('#pfError').hidden = true;
   $('#accessBox').innerHTML = p.has_access
     ? `<b>Profile sign-in is on.</b>
        <div class="cred"><span class="mini">Sign-in name</span><code>${escapeHtml(p.handle)}</code><span class="mini">Page</span><code>${escapeHtml(location.origin)}/me</code></div>
        ${p.must_change ? '<p class="mini">Waiting for them to choose their own password.</p>' : ''}
-       <div class="btn-row access-actions"><button class="btn" id="accReset">Reset password</button><button class="btn danger" id="accRevoke">Turn off sign-in</button></div>`
+       <div class="btn-row access-actions"><button type="button" class="btn" id="accReset">Reset password</button><button type="button" class="btn danger" id="accRevoke">Turn off sign-in</button></div>`
     : `<b>No profile sign-in yet.</b>
        <p class="mini">Create one so this person can sign in at <code>/me</code>, add their own photo and manage their details.</p>
-       <button class="btn primary" id="accCreate">Create sign-in</button>`;
+       <button type="button" class="btn primary" id="accCreate">Create sign-in</button>`;
   const on = (id, fn) => { const el = $(id); if (el) el.addEventListener('click', fn); };
   on('#accCreate', () => grantAccess(false));
   on('#accReset', () => grantAccess(true));
@@ -591,9 +684,12 @@ async function refreshProfile() {
 }
 
 async function openProfile(id) {
+  profOpener = document.activeElement;
   profId = id;
   await refreshProfile();
   $('#profBack').hidden = false;
+  profUntrap = trapKeys($('#profBack'), closeProfile);
+  const h = $('#profTitle'); h.setAttribute('tabindex', '-1'); h.focus();
 }
 
 async function grantAccess(isReset) {
@@ -603,7 +699,7 @@ async function grantAccess(isReset) {
   await refreshProfile();
   // Show the one-time temporary password.
   $('#accessBox').insertAdjacentHTML('afterbegin', `
-    <div class="form-error one-time"><b>${isReset ? 'New temporary password' : 'Sign-in created'} — shown once, copy it now.</b>
+    <div class="form-error one-time" role="alert"><b>${isReset ? 'New temporary password' : 'Sign-in created'} — shown once, copy it now.</b>
       <div class="cred"><span>Sign-in name</span><code>${escapeHtml(d.handle)}</code><span>Temporary password</span><code>${escapeHtml(d.temp_password)}</code></div>
       <p class="mini">They'll be asked to choose their own password the first time they sign in.</p></div>`);
 }
@@ -621,9 +717,12 @@ $('#profPhotoRemove').addEventListener('click', async () => {
 $('#profForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const p = profData;
+  const mode = document.querySelector('input[name=pf_avatar_mode]:checked');
   const res = await adminFetch(`/api/people/${p.id}`, { method: 'PUT', body: JSON.stringify({
     name: p.name, tenant_id: p.tenant_id, active: !!p.active,
-    phone: $('#pfPhone').value, title: $('#pfTitle').value, email: $('#pfEmail').value, bio: $('#pfBio').value,
+    phone: $('#pfPhone').value, title: $('#pfTitle').value, email: $('#pfEmail').value, bio: $('#pfBio').value, office: $('#pfOffice').value,
+    show_office: $('#pfVisOffice').checked, show_phone: $('#pfVisPhone').checked, show_email: $('#pfVisEmail').checked,
+    avatar_mode: mode ? mode.value : 'photo', is_manager: $('#pfManager').checked,
   }) });
   if (res.ok) { toast('Profile saved'); refreshProfile(); }
   else { const err = $('#pfError'); err.hidden = false; err.textContent = (await json(res)).error || 'Could not save'; }
@@ -636,18 +735,20 @@ $('#profBack').addEventListener('click', (e) => { if (e.target === $('#profBack'
 // ---------------------------------------------------------------------------
 
 const MODES = [
-  { id: 'search', label: 'Search only', desc: 'Staff type their name to find themselves. Nobody else is shown. Best for privacy.' },
-  { id: 'browse', label: 'Show everyone', desc: 'The whole roster is visible on the kiosk, grouped by tenant, and stays up to date. Faster to tap, but anyone at the screen sees who works here (and their photo).' },
+  { id: 'browse', label: 'Show everyone', desc: 'The whole directory is visible, grouped by tenant, and stays up to date. People only show the contact details they chose to share.' },
+  { id: 'search', label: 'Search only', desc: 'Visitors must type a name or company to see anyone. Best for privacy on a shared tablet.' },
 ];
 
 async function loadSettings() {
   const st = await json(await adminFetch('/api/admin/settings'));
   const radio = (name, items, value) => items.map((o) => `
-    <label class="opt ${o.id === value ? 'selected' : ''}">
+    <label class="opt">
       <input type="radio" name="${name}" value="${o.id}" ${o.id === value ? 'checked' : ''} />
       <span class="opt-body"><b>${escapeHtml(o.label)}</b><span class="mini">${escapeHtml(o.desc)}</span>
-      ${name === 'kiosk_layout' ? `<a class="mini" href="/?layout=${o.id}" target="_blank" rel="noopener">Preview ↗</a>` : ''}</span>
+      ${name === 'kiosk_layout' ? `<a class="mini" href="/?layout=${o.id}" target="_blank" rel="noopener">Preview ${escapeHtml(o.label)}<span class="sr-only"> (opens in a new tab)</span> ↗</a>` : ''}</span>
     </label>`).join('');
+  $('#layoutOpts').setAttribute('role', 'radiogroup'); $('#layoutOpts').setAttribute('aria-label', 'Default layout');
+  $('#modeOpts').setAttribute('role', 'radiogroup'); $('#modeOpts').setAttribute('aria-label', 'What the board shows');
   $('#layoutOpts').innerHTML = radio('kiosk_layout', IO.LAYOUTS, st.kiosk_layout);
   $('#modeOpts').innerHTML = radio('kiosk_mode', MODES, st.kiosk_mode);
 }
@@ -656,7 +757,7 @@ $('#admin-settings').addEventListener('change', async (e) => {
   const input = e.target.closest('input[type=radio]');
   if (!input) return;
   const res = await adminFetch('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ [input.name]: input.value }) });
-  if (res.ok) { toast('Saved'); loadSettings(); } else toast((await json(res)).error || 'Could not save', true);
+  if (res.ok) { toast('Saved'); await loadSettings(); const again = document.querySelector(`input[name="${input.name}"][value="${input.value}"]`); if (again) again.focus(); } else toast((await json(res)).error || 'Could not save', true);
 });
 
 // ---------------------------------------------------------------------------

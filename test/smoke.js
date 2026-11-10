@@ -94,12 +94,53 @@ async function t(name, fn) {
     assert.equal((await call('GET', `/api/people/${personId}`)).data.title, 'Lead');
   });
 
-  await t('kiosk search is public, limited fields, name-only matching', async () => {
-    const r = await call('GET', '/api/kiosk/search?q=dana', undefined, { jar: false });
-    assert.equal(r.data.length, 1);
-    assert.deepEqual(Object.keys(r.data[0]).sort(), ['clocked_at', 'id', 'name', 'photo_url', 'status', 'tenant_name', 'title']);
-    assert.deepEqual((await call('GET', '/api/kiosk/search?q=555', undefined, { jar: false })).data, []);
-    assert.deepEqual((await call('GET', '/api/kiosk/search?q=', undefined, { jar: false })).data, []);
+  await t('directory is public and groups people by tenant; contact info is hidden by default', async () => {
+    const r = (await call('GET', '/api/directory', undefined, { jar: false })).data;
+    assert.equal(r.mode, 'browse'); assert.equal(r.layout, 'table');
+    const plaza = r.tenants.find((x) => x.name === 'Plaza North 2');
+    assert.ok(plaza, 'tenant listed'); assert.equal(plaza.people.length, 1);
+    const p = plaza.people[0];
+    assert.equal(p.name, 'Dana Whitfield'); assert.equal(p.phone, ''); assert.equal(p.email, '');
+    assert.ok(r.tenants.length >= 2, 'seeded Main Office is listed too');
+    // search matches names (and tenant names) but never phone numbers
+    assert.equal((await call('GET', '/api/directory?q=dana', undefined, { jar: false })).data.tenants[0].people.length, 1);
+    assert.deepEqual((await call('GET', '/api/directory?q=555', undefined, { jar: false })).data.tenants, []);
+    // none of the private fields leak
+    const keys = Object.keys(p).sort();
+    assert.deepEqual(keys, ['avatar_kind', 'avatar_url', 'clocked_at', 'email', 'id', 'name', 'office', 'phone', 'status', 'title']);
+  });
+
+  await t('visibility: person-controlled contact details appear only when switched on', async () => {
+    await call('PUT', `/api/people/${personId}`, { name: 'Dana Whitfield', tenant_id: tenantId, active: true, phone: '555-0101', email: 'dana@example.com', office: 'Suite 204', show_phone: true });
+    let p = (await call('GET', '/api/directory?q=dana', undefined, { jar: false })).data.tenants[0].people[0];
+    assert.equal(p.phone, '555-0101'); assert.equal(p.email, ''); assert.equal(p.office, 'Suite 204');
+    await call('PUT', `/api/people/${personId}`, { name: 'Dana Whitfield', tenant_id: tenantId, active: true, show_email: true, show_office: false });
+    p = (await call('GET', '/api/directory?q=dana', undefined, { jar: false })).data.tenants[0].people[0];
+    assert.equal(p.email, 'dana@example.com'); assert.equal(p.office, ''); assert.equal(p.phone, '555-0101');
+    // bulk hide phones for the whole tenant
+    const bulk = await call('POST', '/api/admin/visibility', { field: 'show_phone', value: false, tenant_id: tenantId });
+    assert.equal(bulk.data.updated, 1);
+    p = (await call('GET', '/api/directory?q=dana', undefined, { jar: false })).data.tenants[0].people[0];
+    assert.equal(p.phone, '');
+    assert.equal((await call('POST', '/api/admin/visibility', { field: 'password_hash', value: true })).status, 400, 'field is whitelisted');
+    assert.equal((await call('POST', '/api/admin/visibility', { field: 'show_phone', value: true }, { jar: false })).status, 401);
+  });
+
+  await t('tenant company details, logo and avatar choice (photo vs logo vs initials)', async () => {
+    assert.equal((await call('PUT', `/api/tenants/${tenantId}`, { name: 'Plaza North 2', notes: '', office: 'Floor 2', phone: '555-9000', email: 'hello@plaza.example', website: 'plaza.example' })).status, 200);
+    assert.equal((await call('PUT', `/api/tenants/${tenantId}`, { name: 'x', website: 'javascript:alert(1)' })).status, 400);
+    const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64)]);
+    const logo = await call('PUT', `/api/tenants/${tenantId}/logo`, png, { raw: true, headers: { 'Content-Type': 'image/png' } });
+    assert.equal(logo.status, 200);
+    assert.equal((await call('PUT', `/api/tenants/${tenantId}/logo`, Buffer.from('<svg onload=alert(1)>'), { raw: true, headers: { 'Content-Type': 'image/png' } })).status, 400);
+    let d = (await call('GET', '/api/directory?q=dana', undefined, { jar: false })).data.tenants[0];
+    assert.equal(d.logo_url, logo.data.logo_url); assert.equal(d.website, 'https://plaza.example'); assert.equal(d.office, 'Floor 2');
+    await call('PUT', `/api/people/${personId}`, { name: 'Dana Whitfield', tenant_id: tenantId, active: true, avatar_mode: 'logo' });
+    assert.equal((await call('GET', '/api/directory?q=dana', undefined, { jar: false })).data.tenants[0].people[0].avatar_url, logo.data.logo_url);
+    await call('PUT', `/api/people/${personId}`, { name: 'Dana Whitfield', tenant_id: tenantId, active: true, avatar_mode: 'initials' });
+    assert.equal((await call('GET', '/api/directory?q=dana', undefined, { jar: false })).data.tenants[0].people[0].avatar_url, null);
+    assert.equal((await call('PUT', `/api/people/${personId}`, { name: 'Dana Whitfield', tenant_id: tenantId, active: true, avatar_mode: 'bogus' })).status, 400);
+    await call('PUT', `/api/people/${personId}`, { name: 'Dana Whitfield', tenant_id: tenantId, active: true, avatar_mode: 'photo' });
   });
 
   await t('public clock in/out, duplicate rejected, shifts computed', async () => {
@@ -128,14 +169,36 @@ async function t(name, fn) {
     const pc = login.set.split(';')[0];
     const me = await fetch(BASE + '/api/people', { headers: { Cookie: pc } });
     assert.equal(me.status, 401, 'person cookie must not open admin endpoints');
+
+    // the person controls what the public sees about them
+    const jar = { Cookie: pc, 'Content-Type': 'application/json' };
+    const put = (url, body) => fetch(BASE + url, { method: 'PUT', headers: jar, body: JSON.stringify(body) });
+    const r1 = await put('/api/me', { office: 'Suite 9', show_phone: true, show_office: true, avatar_mode: 'initials', is_manager: true });
+    assert.equal(r1.status, 200);
+    const mine = await r1.json();
+    assert.equal(mine.is_manager, false, 'people cannot make themselves managers');
+    assert.equal(mine.show_phone, true); assert.equal(mine.avatar_mode, 'initials');
+    assert.equal((await put('/api/me/tenant', { office: 'Hacked' })).status, 403, 'non-manager cannot edit the company');
+    // admin promotes them; now they can
+    await call('PUT', `/api/people/${personId}`, { name: 'Dana Whitfield', tenant_id: tenantId, active: true, is_manager: true });
+    const ok = await put('/api/me/tenant', { office: 'Floor 3', phone: '555-1234' });
+    assert.equal(ok.status, 200); assert.equal((await ok.json()).tenant.office, 'Floor 3');
+    assert.equal((await put('/api/me/tenant', { website: 'not a url' })).status, 400);
+    await call('PUT', `/api/people/${personId}`, { name: 'Dana Whitfield', tenant_id: tenantId, active: true, is_manager: false });
+    assert.equal((await put('/api/me/tenant', { office: 'Again' })).status, 403, 'demoted manager loses access');
   });
 
-  await t('settings: whitelist enforced, layout + mode change kiosk config', async () => {
+  await t('settings: whitelist enforced; layout + mode change the public directory', async () => {
     assert.equal((await call('PUT', '/api/admin/settings', { kiosk_layout: 'evil' })).status, 400);
     assert.equal((await call('PUT', '/api/admin/settings', { nope: 'x' })).status, 400);
-    await call('PUT', '/api/admin/settings', { kiosk_layout: 'tiles', kiosk_mode: 'browse' });
-    assert.deepEqual((await call('GET', '/api/kiosk/config', undefined, { jar: false })).data, { layout: 'tiles', mode: 'browse' });
-    assert.equal((await call('GET', '/api/kiosk/search?q=', undefined, { jar: false })).data.length >= 1, true);
+    await call('PUT', '/api/admin/settings', { kiosk_layout: 'tiles', kiosk_mode: 'search' });
+    let d = (await call('GET', '/api/directory', undefined, { jar: false })).data;
+    assert.equal(d.layout, 'tiles'); assert.deepEqual(d.tenants, [], 'search-only mode lists nobody until you search');
+    assert.equal((await call('GET', '/api/directory?q=dana', undefined, { jar: false })).data.tenants.length, 1);
+    await call('PUT', '/api/admin/settings', { kiosk_layout: 'cards', kiosk_mode: 'browse' });
+    d = (await call('GET', '/api/directory', undefined, { jar: false })).data;
+    assert.equal(d.layout, 'cards'); assert.ok(d.tenants.length >= 2);
+    for (const l of ['table', 'list', 'cards', 'tiles', 'board']) assert.equal((await call('PUT', '/api/admin/settings', { kiosk_layout: l })).status, 200, l);
   });
 
   await t('static pages + security headers; path traversal blocked', async () => {

@@ -110,6 +110,17 @@ addColumn('people', 'handle', 'TEXT');
 addColumn('people', 'pass_hash', 'TEXT');
 addColumn('people', 'must_change', 'INTEGER NOT NULL DEFAULT 0');
 addColumn('people', 'profile_updated_at', 'INTEGER');
+addColumn('people', 'office', "TEXT NOT NULL DEFAULT ''");
+addColumn('people', 'show_phone', 'INTEGER NOT NULL DEFAULT 0');
+addColumn('people', 'show_email', 'INTEGER NOT NULL DEFAULT 0');
+addColumn('people', 'show_office', 'INTEGER NOT NULL DEFAULT 1');
+addColumn('people', 'avatar_mode', "TEXT NOT NULL DEFAULT 'photo'");
+addColumn('people', 'is_manager', 'INTEGER NOT NULL DEFAULT 0');
+addColumn('tenants', 'logo', 'TEXT');
+addColumn('tenants', 'office', "TEXT NOT NULL DEFAULT ''");
+addColumn('tenants', 'phone', "TEXT NOT NULL DEFAULT ''");
+addColumn('tenants', 'email', "TEXT NOT NULL DEFAULT ''");
+addColumn('tenants', 'website', "TEXT NOT NULL DEFAULT ''");
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_people_handle ON people(handle) WHERE handle IS NOT NULL');
 
 // Seed a default tenant + the original board roster (only when empty).
@@ -380,6 +391,17 @@ function latestEventPerPerson() {
   `).all();
 }
 
+// Which picture to show for someone: their photo, their company's logo, or none (initials).
+function resolveAvatar(p) {
+  if (p.avatar_mode === 'initials') return null;
+  if (p.avatar_mode === 'logo') return photoUrl(p.tenant_logo);
+  return photoUrl(p.photo);
+}
+
+function avatarKind(p) {
+  return resolveAvatar(p) ? (p.avatar_mode === 'logo' ? 'logo' : 'photo') : null;
+}
+
 function buildStatus(search, tenantId, matchPhone = true) {
   const events = latestEventPerPerson();
   const eventByPerson = new Map();
@@ -390,8 +412,8 @@ function buildStatus(search, tenantId, matchPhone = true) {
   if (search) {
     const like = `%${search}%`;
     if (matchPhone) {
-      clauses.push('(p.name LIKE ? OR p.phone LIKE ? OR t.name LIKE ?)');
-      params.push(like, like, like);
+      clauses.push('(p.name LIKE ? OR p.phone LIKE ? OR p.email LIKE ? OR t.name LIKE ?)');
+      params.push(like, like, like, like);
     } else {
       clauses.push('(p.name LIKE ? OR t.name LIKE ?)');
       params.push(like, like);
@@ -403,7 +425,9 @@ function buildStatus(search, tenantId, matchPhone = true) {
   }
 
   const rows = db.prepare(`
-    SELECT p.id, p.name, p.phone, p.title, p.photo, p.tenant_id, t.name AS tenant_name
+    SELECT p.id, p.name, p.phone, p.email, p.office, p.title, p.photo, p.avatar_mode, p.is_manager,
+           p.show_phone, p.show_email, p.show_office, p.tenant_id,
+           t.name AS tenant_name, t.logo AS tenant_logo
     FROM people p
     JOIN tenants t ON t.id = p.tenant_id
     WHERE ${clauses.join(' AND ')}
@@ -416,8 +440,17 @@ function buildStatus(search, tenantId, matchPhone = true) {
       id: r.id,
       name: r.name,
       phone: r.phone,
+      email: r.email,
+      office: r.office,
       title: r.title,
       photo_url: photoUrl(r.photo),
+      avatar_url: resolveAvatar(r),
+      avatar_kind: avatarKind(r),
+      avatar_mode: r.avatar_mode,
+      show_phone: !!r.show_phone,
+      show_email: !!r.show_email,
+      show_office: !!r.show_office,
+      is_manager: !!r.is_manager,
       tenant_id: r.tenant_id,
       tenant_name: r.tenant_name,
       status: last ? last.direction : 'none',
@@ -427,6 +460,32 @@ function buildStatus(search, tenantId, matchPhone = true) {
   });
 }
 
+// What the PUBLIC directory may show: contact details only when the person opted in.
+function publicPerson(p) {
+  return {
+    id: p.id, name: p.name, title: p.title,
+    status: p.status, clocked_at: p.clocked_at,
+    avatar_url: p.avatar_url, avatar_kind: p.avatar_kind,
+    phone: p.show_phone ? p.phone : '',
+    email: p.show_email ? p.email : '',
+    office: p.show_office ? p.office : '',
+  };
+}
+
+function publicTenant(t) {
+  return { id: t.id, name: t.name, office: t.office, phone: t.phone, email: t.email, website: t.website, logo_url: photoUrl(t.logo) };
+}
+
+function buildDirectory(search, tenantId) {
+  const people = buildStatus(search, tenantId, false).slice(0, 500);
+  const tenantRows = new Map(db.prepare('SELECT id, name, office, phone, email, website, logo FROM tenants').all().map((t) => [t.id, t]));
+  const groups = new Map();
+  for (const p of people) {
+    if (!groups.has(p.tenant_id)) groups.set(p.tenant_id, { ...publicTenant(tenantRows.get(p.tenant_id)), people: [] });
+    groups.get(p.tenant_id).people.push(publicPerson(p));
+  }
+  return [...groups.values()].map((g) => ({ ...g, total: g.people.length, in_count: g.people.filter((p) => p.status === 'in').length }));
+}
 
 // ---------------------------------------------------------------------------
 // Reporting helpers (admin dashboard)
@@ -601,15 +660,26 @@ function servePhoto(res, name) {
 }
 
 // Validate the profile fields a person (or an admin) may set. Only keys present are returned.
-function cleanProfile(body) {
+// Booleans come back as 0/1, ready for SQLite. `is_manager` can only be set by an admin.
+const AVATAR_MODES = ['photo', 'logo', 'initials'];
+const BOOL_FIELDS = ['show_phone', 'show_email', 'show_office'];
+
+function cleanProfile(body, { admin = false } = {}) {
   const out = {};
-  const limits = { title: 80, phone: 40, email: 120, bio: 600 };
+  const limits = { title: 80, phone: 40, email: 120, bio: 600, office: 80 };
   for (const [k, max] of Object.entries(limits)) {
     if (body[k] === undefined) continue;
     const v = String(body[k] ?? '').trim();
-    if (v.length > max) return { error: `${k} must be ${max} characters or fewer` };
+    if (v.length > max) return { error: `${k.replace('_', ' ')} must be ${max} characters or fewer` };
     if (k === 'email' && v && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) return { error: 'Enter a valid email address' };
     out[k] = v;
+  }
+  for (const k of [...BOOL_FIELDS, ...(admin ? ['is_manager'] : [])]) {
+    if (body[k] !== undefined) out[k] = body[k] === true || body[k] === 1 || body[k] === '1' ? 1 : 0;
+  }
+  if (body.avatar_mode !== undefined) {
+    if (!AVATAR_MODES.includes(body.avatar_mode)) return { error: 'avatar_mode must be photo, logo or initials' };
+    out.avatar_mode = body.avatar_mode;
   }
   return { fields: out };
 }
@@ -617,15 +687,69 @@ function cleanProfile(body) {
 function updateProfileFields(personId, fields) {
   const keys = Object.keys(fields);
   if (!keys.length) return;
+  // keys come only from cleanProfile's fixed whitelist
   db.prepare(`UPDATE people SET ${keys.map((k) => `${k} = ?`).join(', ')}, profile_updated_at = ? WHERE id = ?`)
     .run(...keys.map((k) => fields[k]), nowMs(), personId);
+}
+
+// Company details (admin, or a person flagged as their tenant's manager).
+function cleanTenantFields(body) {
+  const out = {};
+  const limits = { office: 80, phone: 40, email: 120, website: 200 };
+  for (const [k, max] of Object.entries(limits)) {
+    if (body[k] === undefined) continue;
+    let v = String(body[k] ?? '').trim();
+    if (v.length > max) return { error: `${k} must be ${max} characters or fewer` };
+    if (k === 'email' && v && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) return { error: 'Enter a valid email address' };
+    if (k === 'website' && v) {
+      // refuse other schemes (javascript:, data:, ...); allow bare domains and host:port
+      if (/^[a-z][a-z0-9+.\-]*:(?!\d)/i.test(v) && !/^https?:\/\//i.test(v)) return { error: 'Enter a valid website address' };
+      if (!/^https?:\/\//i.test(v)) v = 'https://' + v;
+      if (!/^https?:\/\/[^\s/$.?#][^\s]*$/i.test(v)) return { error: 'Enter a valid website address' };
+    }
+    out[k] = v;
+  }
+  return { fields: out };
+}
+
+function updateTenantFields(tenantId, fields) {
+  const keys = Object.keys(fields);
+  if (!keys.length) return;
+  db.prepare(`UPDATE tenants SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`)
+    .run(...keys.map((k) => fields[k]), tenantId);
+}
+
+function setTenantLogo(tenantId, buf) {
+  const ext = detectImageExt(buf);
+  if (!ext) return { error: 'Logo must be a JPEG, PNG or WebP image' };
+  if (buf.length > MAX_PHOTO_BYTES) return { error: 'Logo is too large (max 2 MB)' };
+  const name = crypto.randomBytes(16).toString('hex') + ext;
+  fs.writeFileSync(path.join(UPLOAD_DIR, name), buf);
+  const old = db.prepare('SELECT logo FROM tenants WHERE id = ?').get(tenantId);
+  db.prepare('UPDATE tenants SET logo = ? WHERE id = ?').run(name, tenantId);
+  unlinkPhoto(old && old.logo);
+  return { logo_url: photoUrl(name) };
+}
+
+function clearTenantLogo(tenantId) {
+  const old = db.prepare('SELECT logo FROM tenants WHERE id = ?').get(tenantId);
+  db.prepare('UPDATE tenants SET logo = NULL WHERE id = ?').run(tenantId);
+  unlinkPhoto(old && old.logo);
 }
 
 function profileRow(row) {
   return {
     id: row.id, name: row.name, tenant_id: row.tenant_id, tenant_name: row.tenant_name,
-    phone: row.phone, email: row.email, title: row.title, bio: row.bio,
+    phone: row.phone, email: row.email, title: row.title, bio: row.bio, office: row.office,
     photo_url: photoUrl(row.photo), handle: row.handle || null,
+    show_phone: !!row.show_phone, show_email: !!row.show_email, show_office: !!row.show_office,
+    avatar_mode: row.avatar_mode, is_manager: !!row.is_manager,
+    avatar_url: resolveAvatar({ photo: row.photo, avatar_mode: row.avatar_mode, tenant_logo: row.tenant_logo }),
+    avatar_kind: avatarKind({ photo: row.photo, avatar_mode: row.avatar_mode, tenant_logo: row.tenant_logo }),
+    tenant: {
+      id: row.tenant_id, name: row.tenant_name, logo_url: photoUrl(row.tenant_logo),
+      office: row.tenant_office, phone: row.tenant_phone, email: row.tenant_email, website: row.tenant_website,
+    },
     has_access: !!row.pass_hash, must_change: !!row.must_change, active: row.active,
     profile_updated_at: row.profile_updated_at || null,
   };
@@ -633,7 +757,9 @@ function profileRow(row) {
 
 function getProfile(personId) {
   const row = db.prepare(`
-    SELECT p.*, t.name AS tenant_name FROM people p JOIN tenants t ON t.id = p.tenant_id WHERE p.id = ?
+    SELECT p.*, t.name AS tenant_name, t.logo AS tenant_logo, t.office AS tenant_office,
+           t.phone AS tenant_phone, t.email AS tenant_email, t.website AS tenant_website
+    FROM people p JOIN tenants t ON t.id = p.tenant_id WHERE p.id = ?
   `).get(personId);
   return row ? profileRow(row) : null;
 }
@@ -670,16 +796,19 @@ function personCookie(req, value, maxAgeSec) {
 
 // Photos must be removed from disk when their person rows are cascade-deleted.
 function photosForTenant(tenantId) {
-  return db.prepare('SELECT photo FROM people WHERE tenant_id = ? AND photo IS NOT NULL').all(tenantId).map((r) => r.photo);
+  const files = db.prepare('SELECT photo FROM people WHERE tenant_id = ? AND photo IS NOT NULL').all(tenantId).map((r) => r.photo);
+  const t = db.prepare('SELECT logo FROM tenants WHERE id = ?').get(tenantId);
+  if (t && t.logo) files.push(t.logo);
+  return files;
 }
 
 // ---------------------------------------------------------------------------
 // Settings (admin-controlled, whitelisted)
 // ---------------------------------------------------------------------------
 
-const SETTING_DEFAULTS = { kiosk_layout: 'list', kiosk_mode: 'search' };
+const SETTING_DEFAULTS = { kiosk_layout: 'table', kiosk_mode: 'browse' };
 const SETTING_OPTIONS = {
-  kiosk_layout: ['list', 'cards', 'tiles', 'board'],
+  kiosk_layout: ['table', 'list', 'cards', 'tiles', 'board'],
   kiosk_mode: ['search', 'browse'],
 };
 
@@ -699,12 +828,12 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   // Normalise /api/<resource>/<numeric id> to /api/<resource>/:id for routing.
   const idMatch = url.pathname.match(/^\/api\/(tenants|people|events|admin\/users)\/(\d+)$/);
-  const subMatch = url.pathname.match(/^\/api\/people\/(\d+)\/(photo|access)$/);
+  const subMatch = url.pathname.match(/^\/api\/(people|tenants)\/(\d+)\/(photo|access|logo)$/);
   const route = idMatch
     ? `${req.method} /api/${idMatch[1]}/:id`
-    : subMatch ? `${req.method} /api/people/:id/${subMatch[2]}`
+    : subMatch ? `${req.method} /api/${subMatch[1]}/:id/${subMatch[3]}`
     : `${req.method} ${url.pathname}`;
-  const routeId = idMatch ? Number(idMatch[2]) : (subMatch ? Number(subMatch[1]) : null);
+  const routeId = idMatch ? Number(idMatch[2]) : (subMatch ? Number(subMatch[2]) : null);
 
   try {
     // ---- Static files ------------------------------------------------------
@@ -803,6 +932,19 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, { ok: true });
     }
 
+    // ---- Admin: a tenant's logo ---------------------------------------------------
+    if (route === 'PUT /api/tenants/:id/logo') {
+      if (!requireAdmin(res, req)) return;
+      if (!db.prepare('SELECT id FROM tenants WHERE id = ?').get(routeId)) return sendJSON(res, 404, { error: 'tenant not found' });
+      const r = setTenantLogo(routeId, await readRaw(req, MAX_PHOTO_BYTES + 1024));
+      return r.error ? sendJSON(res, 400, r) : sendJSON(res, 200, r);
+    }
+    if (route === 'DELETE /api/tenants/:id/logo') {
+      if (!requireAdmin(res, req)) return;
+      clearTenantLogo(routeId);
+      return sendJSON(res, 200, { ok: true });
+    }
+
     // ---- Admin: a person's photo & account access ----------------------------
     if (route === 'PUT /api/people/:id/photo') {
       if (!requireAdmin(res, req)) return;
@@ -863,12 +1005,25 @@ const server = http.createServer(async (req, res) => {
     }
     if (route === 'PUT /api/me') {
       const me = requirePerson(res, req); if (!me) return;
-      const prof = cleanProfile(await readBody(req));
+      const prof = cleanProfile(await readBody(req)); // is_manager is admin-only, ignored here
       if (prof.error) return sendJSON(res, 400, { error: prof.error });
-      if (prof.fields.phone !== undefined) db.prepare('UPDATE people SET phone = ? WHERE id = ?').run(prof.fields.phone, me.id);
-      const { phone: _p, ...rest } = prof.fields;
-      updateProfileFields(me.id, rest);
+      updateProfileFields(me.id, prof.fields);
       return sendJSON(res, 200, getProfile(me.id));
+    }
+    // A person flagged as their tenant's manager can maintain the company profile.
+    if (route === 'PUT /api/me/tenant' || route === 'PUT /api/me/tenant/logo' || route === 'DELETE /api/me/tenant/logo') {
+      const me = requirePerson(res, req); if (!me) return;
+      const row = db.prepare('SELECT tenant_id, is_manager FROM people WHERE id = ?').get(me.id);
+      if (!row.is_manager) return sendJSON(res, 403, { error: 'Only a tenant manager can change the company profile' });
+      if (route === 'PUT /api/me/tenant') {
+        const tf = cleanTenantFields(await readBody(req));
+        if (tf.error) return sendJSON(res, 400, { error: tf.error });
+        updateTenantFields(row.tenant_id, tf.fields);
+        return sendJSON(res, 200, getProfile(me.id));
+      }
+      if (route === 'DELETE /api/me/tenant/logo') { clearTenantLogo(row.tenant_id); return sendJSON(res, 200, { ok: true }); }
+      const r = setTenantLogo(row.tenant_id, await readRaw(req, MAX_PHOTO_BYTES + 1024));
+      return r.error ? sendJSON(res, 400, r) : sendJSON(res, 200, r);
     }
     if (route === 'PUT /api/me/photo') {
       const me = requirePerson(res, req); if (!me) return;
@@ -898,10 +1053,6 @@ const server = http.createServer(async (req, res) => {
     }
 
     // ---- Settings ------------------------------------------------------------
-    if (route === 'GET /api/kiosk/config') {
-      const st = getSettings();
-      return sendJSON(res, 200, { layout: st.kiosk_layout, mode: st.kiosk_mode });
-    }
     if (route === 'GET /api/admin/settings') {
       if (!requireAdmin(res, req)) return;
       return sendJSON(res, 200, getSettings());
@@ -918,16 +1069,27 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, getSettings());
     }
 
-    // ---- Public kiosk: search by name, then IN/OUT -------------------------
-    if (route === 'GET /api/kiosk/search') {
-      const q = (url.searchParams.get('q') || '').trim();
-      const browse = getSettings().kiosk_mode === 'browse';
-      if (!q && !browse) return sendJSON(res, 200, []);
-      const rows = buildStatus(q.slice(0, 60), null, false).slice(0, q ? 25 : 300).map((p) => ({
-        id: p.id, name: p.name, tenant_name: p.tenant_name, title: p.title, photo_url: p.photo_url,
-        status: p.status, clocked_at: p.clocked_at,
-      }));
-      return sendJSON(res, 200, rows);
+    // ---- Public directory: everyone, grouped by tenant, honouring each person's privacy choices ----
+    if (route === 'GET /api/directory') {
+      const st = getSettings();
+      const q = (url.searchParams.get('q') || '').trim().slice(0, 60);
+      const tenantId = Number(url.searchParams.get('tenant_id')) || null;
+      const base = { layout: st.kiosk_layout, mode: st.kiosk_mode };
+      if (!q && st.kiosk_mode !== 'browse') return sendJSON(res, 200, { ...base, tenants: [] });
+      return sendJSON(res, 200, { ...base, tenants: buildDirectory(q, tenantId) });
+    }
+
+    // ---- Admin: bulk-set what people show publicly ---------------------------------
+    if (route === 'POST /api/admin/visibility') {
+      if (!requireAdmin(res, req)) return;
+      const body = await readBody(req);
+      if (!BOOL_FIELDS.includes(body.field)) return sendJSON(res, 400, { error: 'field must be show_phone, show_email or show_office' });
+      const val = body.value === true ? 1 : 0;
+      const tid = Number(body.tenant_id) || null;
+      const r = tid
+        ? db.prepare(`UPDATE people SET ${body.field} = ? WHERE tenant_id = ?`).run(val, tid)
+        : db.prepare(`UPDATE people SET ${body.field} = ?`).run(val);
+      return sendJSON(res, 200, { updated: Number(r.changes) });
     }
 
     // ---- Health ------------------------------------------------------------
@@ -939,9 +1101,9 @@ const server = http.createServer(async (req, res) => {
     if (route === 'GET /api/tenants') {
       if (!requireAdmin(res, req)) return;
       const rows = db.prepare(
-        'SELECT id, name, notes, created_at FROM tenants ORDER BY name COLLATE NOCASE'
+        'SELECT id, name, notes, office, phone, email, website, logo, created_at FROM tenants ORDER BY name COLLATE NOCASE'
       ).all();
-      return sendJSON(res, 200, rows);
+      return sendJSON(res, 200, rows.map(({ logo, ...t }) => ({ ...t, logo_url: photoUrl(logo) })));
     }
 
     if (route === 'POST /api/tenants') {
@@ -950,10 +1112,13 @@ const server = http.createServer(async (req, res) => {
       if (!body.name || !String(body.name).trim()) {
         return sendJSON(res, 400, { error: 'name is required' });
       }
+      const tf = cleanTenantFields(body);
+      if (tf.error) return sendJSON(res, 400, { error: tf.error });
       const id = Number(
         db.prepare('INSERT INTO tenants (name, notes, created_at) VALUES (?, ?, ?)')
           .run(String(body.name).trim(), String(body.notes || ''), nowMs()).lastInsertRowid
       );
+      updateTenantFields(id, tf.fields);
       return sendJSON(res, 201, { id, name: String(body.name).trim() });
     }
 
@@ -968,8 +1133,11 @@ const server = http.createServer(async (req, res) => {
       }
       const body = await readBody(req);
       if (!String(body.name || '').trim()) return sendJSON(res, 400, { error: 'name is required' });
+      const tf = cleanTenantFields(body);
+      if (tf.error) return sendJSON(res, 400, { error: tf.error });
       db.prepare('UPDATE tenants SET name = ?, notes = ? WHERE id = ?')
         .run(String(body.name || '').trim(), String(body.notes || ''), id);
+      updateTenantFields(id, tf.fields);
       return sendJSON(res, 200, { ok: true });
     }
 
@@ -990,13 +1158,18 @@ const server = http.createServer(async (req, res) => {
         params.push(Number(tenantId));
       }
       const rows = db.prepare(`
-        SELECT p.id, p.name, p.phone, p.email, p.title, p.photo, p.handle, p.tenant_id, p.active,
-               (p.pass_hash IS NOT NULL) AS has_access, t.name AS tenant_name
+        SELECT p.id, p.name, p.phone, p.email, p.office, p.title, p.photo, p.handle, p.tenant_id, p.active,
+               p.show_phone, p.show_email, p.show_office, p.avatar_mode, p.is_manager,
+               (p.pass_hash IS NOT NULL) AS has_access, t.name AS tenant_name, t.logo AS tenant_logo
         FROM people p JOIN tenants t ON t.id = p.tenant_id
         WHERE ${clauses.join(' AND ')}
         ORDER BY t.name COLLATE NOCASE, p.name COLLATE NOCASE
       `).all(...params);
-      return sendJSON(res, 200, rows.map(({ photo, ...r }) => ({ ...r, photo_url: photoUrl(photo), has_access: !!r.has_access })));
+      return sendJSON(res, 200, rows.map(({ photo, tenant_logo, ...r }) => ({
+        ...r, photo_url: photoUrl(photo), avatar_url: resolveAvatar({ photo, avatar_mode: r.avatar_mode, tenant_logo }),
+        avatar_kind: avatarKind({ photo, avatar_mode: r.avatar_mode, tenant_logo }),
+        has_access: !!r.has_access, show_phone: !!r.show_phone, show_email: !!r.show_email, show_office: !!r.show_office, is_manager: !!r.is_manager,
+      })));
     }
 
     if (route === 'GET /api/people/:id') {
@@ -1036,18 +1209,11 @@ const server = http.createServer(async (req, res) => {
       if (!db.prepare('SELECT id FROM tenants WHERE id = ?').get(Number(body.tenant_id))) {
         return sendJSON(res, 400, { error: 'tenant_id does not exist' });
       }
-      const prof = cleanProfile(body);
+      const prof = cleanProfile(body, { admin: true });
       if (prof.error) return sendJSON(res, 400, { error: prof.error });
-      const { phone: _ignored, ...profileOnly } = prof.fields; // phone is handled by the main UPDATE
-      db.prepare('UPDATE people SET tenant_id = ?, name = ?, phone = ?, active = ? WHERE id = ?')
-        .run(
-          Number(body.tenant_id),
-          String(body.name || '').trim(),
-          String(body.phone || ''),
-          body.active ? 1 : 0,
-          id
-        );
-      updateProfileFields(id, profileOnly);
+      db.prepare('UPDATE people SET tenant_id = ?, name = ?, active = ? WHERE id = ?')
+        .run(Number(body.tenant_id), String(body.name || '').trim(), body.active ? 1 : 0, id);
+      updateProfileFields(id, prof.fields);
       return sendJSON(res, 200, { ok: true });
     }
 

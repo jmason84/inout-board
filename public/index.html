@@ -4,18 +4,53 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>IN/OUT Board</title>
+  <script src="/prefs.js"></script>
   <link rel="stylesheet" href="/style.css" />
 </head>
-<body class="kiosk-body">
-  <main class="kiosk">
-    <div class="kiosk-clock" id="kioskClock"></div>
-    <h1>IN / OUT</h1>
-    <input type="search" id="kioskSearch" class="search big" placeholder="Type your name…" autocomplete="off" autocapitalize="words" autofocus />
-    <div id="kioskResults" class="kiosk-results" aria-live="polite"></div>
-    <p class="kiosk-foot"><a href="/me">My profile</a></p>
+<body>
+  <a class="skip" href="#directory">Skip to the list of people</a>
+
+  <header class="topbar">
+    <div class="brand"><span class="brand-dot" aria-hidden="true"></span><h1>IN/OUT Board</h1></div>
+    <nav class="head-tools" aria-label="Site">
+      <div class="seg" role="group" aria-label="Text size">
+        <button type="button" class="seg-btn" data-size="" aria-pressed="true" aria-label="Normal text size">A</button>
+        <button type="button" class="seg-btn" data-size="large" aria-pressed="false" aria-label="Large text size">A+</button>
+        <button type="button" class="seg-btn" data-size="xlarge" aria-pressed="false" aria-label="Extra large text size">A++</button>
+      </div>
+      <a class="tab" href="/me">My profile</a>
+      <a class="tab" href="/admin">Admin</a>
+    </nav>
+    <div class="clock" id="clock" aria-hidden="true"></div>
+  </header>
+
+  <main class="home" id="main">
+    <h2 class="sr-only">Who is in and who is out</h2>
+
+    <section class="controls" aria-label="Find and filter people">
+      <div>
+        <label for="q" class="sr-only">Search by person or company</label>
+        <input type="search" id="q" class="search big" placeholder="Search by name or company…" autocomplete="off" />
+      </div>
+      <div class="control-row">
+        <div class="seg" role="group" aria-label="Show">
+          <button type="button" class="seg-btn" data-status="" aria-pressed="true">Everyone</button>
+          <button type="button" class="seg-btn" data-status="in" aria-pressed="false">In</button>
+          <button type="button" class="seg-btn" data-status="out" aria-pressed="false">Out</button>
+        </div>
+        <div class="seg" role="group" aria-label="Layout" id="layoutSwitch"></div>
+      </div>
+      <nav aria-label="Companies"><div class="chips" id="tenantChips"></div></nav>
+    </section>
+
+    <div class="summary" id="summary" role="status" aria-live="polite"></div>
+    <div id="directory"></div>
+
+    <p class="foot"><a href="/me">Update my profile</a><a href="/admin">Admin sign in</a></p>
   </main>
-  <div id="toast" class="toast" hidden></div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
   <script src="/shared.js"></script>
-  <script src="/kiosk.js"></script>
+  <script src="/home.js"></script>
 </body>
 </html>

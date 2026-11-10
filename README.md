@@ -34,7 +34,7 @@ from their own device.
 | Backend | Node.js built-in HTTP server | Zero npm dependencies |
 | Database | SQLite via `node:sqlite` | Requires Node.js **22.5+** |
 | Frontend | Vanilla HTML / CSS / JS | Served by the same process |
-| Auth | Admin accounts (scrypt) + server-side sessions | HttpOnly `SameSite=Strict` cookie; public kiosk at `/` |
+| Auth | Admin accounts (scrypt) + server-side sessions | HttpOnly `SameSite=Strict` cookie; public board at `/` |
 
 ### Data model
 
@@ -60,10 +60,9 @@ audit history is never overwritten.
 | POST | `/api/people` | Add person | Admin |
 | PUT | `/api/people/:id` | Edit person | Admin |
 | DELETE | `/api/people/:id` | Delete person | Admin |
+| GET | `/api/directory?q=&tenant_id=` | The public board: every tenant with its people, status and ONLY the contact details each person chose to show. Search matches names and tenant names, never phone numbers or emails. Returns the default layout and mode too | Public |
 | POST | `/api/clock` | Clock a person in/out (`person_id`, `direction`); `409` if already in that state | Public (kiosk) |
-| GET | `/api/kiosk/search?q=` | Kiosk name/tenant search; returns only id, name, title, tenant, photo, status (no phone numbers); an empty query returns nothing unless the kiosk is set to *Show everyone* | Public (kiosk) |
-| GET | `/api/kiosk/config` | Kiosk layout and mode | Public (kiosk) |
-| GET/PUT | `/api/admin/settings` | Read / change `kiosk_layout` (`list`/`cards`/`tiles`/`board`) and `kiosk_mode` (`search`/`browse`) | Admin |
+| GET/PUT | `/api/admin/settings` | Read / change `kiosk_layout` (`table`/`list`/`cards`/`tiles`/`board`) and `kiosk_mode` (`browse`/`search`) | Admin |
 | POST | `/api/auth/login` | Sign in (`username`, `password`) → HttpOnly session cookie; throttled to 8 failures / 15 min / IP | Public |
 | POST | `/api/auth/logout` | End the session | Session |
 | GET | `/api/auth/me` | Current admin | Session |
@@ -77,10 +76,14 @@ audit history is never overwritten.
 | DELETE | `/api/people/:id/access` | Turn a person's sign-in off (ends their sessions) | Admin |
 | POST | `/api/me/login` | Person signs in (`handle`, `password`); throttled like admin login | Public |
 | POST | `/api/me/logout` | Person signs out | Person |
-| GET/PUT | `/api/me` | Own profile: `title`, `phone`, `email`, `bio` (name and tenant are admin-only) | Person |
+| GET/PUT | `/api/me` | Own profile: `title`, `office`, `phone`, `email`, `bio`, `show_office`/`show_phone`/`show_email`, `avatar_mode` (`photo`/`logo`/`initials`). Name, tenant and the manager flag are admin-only | Person |
 | PUT/DELETE | `/api/me/photo` | Own photo | Person |
 | POST | `/api/me/password` | Change own password (`current`, `next`, min 8 chars) | Person |
 | GET | `/api/me/shifts` | Own shifts for the last 30 days | Person |
+| PUT/DELETE | `/api/tenants/:id/logo` | Upload (raw PNG/JPEG/WebP, max 2 MB) / remove a tenant's logo | Admin |
+| POST | `/api/admin/visibility` | Bulk-set `show_phone` / `show_email` / `show_office` for everyone or one tenant (`field`, `value`, optional `tenant_id`) | Admin |
+| PUT | `/api/me/tenant` | Edit own company's office, phone, email, website (tenant managers only) | Person (manager) |
+| PUT/DELETE | `/api/me/tenant/logo` | Upload / remove own company's logo (tenant managers only) | Person (manager) |
 | GET | `/photos/<file>` | Serve an uploaded photo (unguessable file names) | Public |
 | GET | `/api/events` | Clock-event history; filters `tenant_id`, `person_id`, `direction`, `from`, `to` (ms), `limit`, `offset`, `paged=1` | Admin |
 | GET | `/api/events.csv` | Same filters, CSV export | Admin |
@@ -97,14 +100,14 @@ audit history is never overwritten.
 
 | URL | Who | What |
 |-----|-----|------|
-| `/` | Anyone (kiosk / tablet by the door) | Type your name, tap **IN** or **OUT**. That's all. No phone numbers, no lists, no admin links. |
+| `/` | Anyone (lobby tablet, staff phones) | The public board: all tenants, search, filters, layouts, IN/OUT buttons. |
 | `/admin` | Admins only (login required) | The full console below. |
 
 ### Admin accounts & security
 
 - Admins sign in at `/admin` with a **username and password** (scrypt-hashed). Sessions are server-side, stored hashed, last 12 hours and ride in an `HttpOnly`, `SameSite=Strict` cookie.
 - The first admin is created on first start from `ADMIN_USER` / `ADMIN_PASSWORD`. If `ADMIN_PASSWORD` is not set, a random password is generated and printed once in the server log. Further admins are added under **Admins** in the console, where you can also change your password.
-- All tenant, people, status, event and report endpoints require a session. The kiosk can only search names (not phones) and clock IN/OUT.
+- All tenant, people, status, event and report endpoints require a session. The public board can only read the directory (showing just what each person chose to share) and clock IN/OUT.
 - Login is throttled, state-changing requests reject cross-origin `Origin` headers, and the old `ADMIN_TOKEN` is gone.
 - Behind HTTPS (recommended — e.g. a reverse proxy or Cloudflare tunnel) set `COOKIE_SECURE=1`, or `TRUST_PROXY=1` so `X-Forwarded-Proto/For` are honoured.
 
@@ -112,28 +115,52 @@ audit history is never overwritten.
 
 Everyone on the board can have a small profile that **they control** and **admins can see and edit**.
 
-- **Photo** — shows next to their name on the kiosk, the live board and the people list (coloured initials if there's no photo). Photos are centre-cropped, resized to 512 px and re-encoded in the browser (which also strips EXIF/location data), then checked on the server by file signature. Only JPEG/PNG/WebP up to 2 MB are accepted; SVG is refused. Files live in `data/uploads/`.
+- **Photo** — shows next to their name on the public board, the live board and the people list (coloured initials if there's no photo). Photos are centre-cropped, resized to 512 px and re-encoded in the browser (which also strips EXIF/location data), then checked on the server by file signature. Only JPEG/PNG/WebP up to 2 MB are accepted; SVG is refused. Files live in `data/uploads/`.
 - **Details** — job title, phone, email and a short bio.
 - **Their own page at `/me`** — sign in, change the photo and details, see their last 30 days of shifts, change their password.
 - **Access is opt-in.** An admin opens a person (the 👤 button on **People**) and clicks **Create sign-in**. That generates a sign-in name (e.g. `dana.whitfield`) and a one-time temporary password, shown once. On first sign-in the person must choose their own password (min 8 characters). **Reset password** issues a new temporary one; **Turn off sign-in** ends their access immediately but keeps the profile.
 - **Admins** can edit any profile field, upload or remove any photo, and manage sign-in access. People can't change their own name or tenant, and a person's session can never reach admin endpoints (separate cookie, separate checks).
 
-> Photos are served publicly by an unguessable file name, because the kiosk shows them to anyone standing at it. If that is too open for your site, tell your admins to leave photos off or put the kiosk behind your network/tunnel access rules.
+> Photos are served publicly by an unguessable file name, because the public board shows them to anyone who can open it. If that is too open for your site, leave photos off (people can pick *initials*), switch the board to *Search only*, or put it behind your network/tunnel access rules.
 
-## Layouts
+## The public board
 
-The people on the board can be shown four ways. Pick what suits each screen:
+`/` shows **every tenant (company) and who is in or out**, grouped by tenant, with each company's logo, office and contact details at the top of its section. Anyone can search, filter and clock IN/OUT.
+
+- **Filters:** search by person or company, show Everyone / In / Out, jump to one company with the company chips.
+- **Layouts** (the visitor picks; the choice is remembered on that device):
 
 | Layout | Looks like | Good for |
 |--------|-----------|----------|
-| **List** | One compact row per person | Small screens, simple setups |
+| **Table** | A directory table: name, office, phone, email, status and a button | Reading contact details at a glance (the default) |
+| **List** | One roomy row per person | Small screens |
 | **Cards** | Photo-forward cards in a grid | Recognising people by face |
 | **Tiles** | Big colour-coded tiles; the whole tile is the button | Wall tablets and touch screens |
-| **Board** | Classic in/out board grouped by tenant, with IN and OUT columns | Anyone used to the paper board |
+| **Board** | Classic in/out board with IN and OUT columns | Anyone used to the paper board |
 
-- **Kiosk:** an admin chooses the layout under **Settings**, and can also choose **Search only** (staff type their name; nobody else is shown) or **Show everyone** (the roster is visible and stays current, grouped by tenant). Add `?layout=tiles` (or `cards`, `board`, `list`) to a tablet's address to override the layout for just that device.
-- **Admin Live Board:** a List / Cards / Tiles / Board switch in the toolbar. Each admin's choice is remembered in their browser.
-- **Show everyone** exposes names and photos to anyone at the kiosk, so leave it on Search only if that matters at your site.
+- **Admin defaults** (Admin > Settings): the layout people see first, and whether the board **shows everyone** or is **search only** (visitors must type a name to see anyone; best for a shared tablet). Add `?layout=tiles` to one tablet's address to force a layout on that device.
+- **Text size:** visitors can switch between normal, large and extra-large text; it is remembered on that device.
+
+### What each person shows (privacy by choice)
+
+A person's **name, job title, picture and IN/OUT status** are always shown. Everything else is opt-in and controlled by the person (at `/me`) or an admin:
+
+| Detail | Default | Who can change it |
+|--------|---------|-------------------|
+| Office / suite | shown (if filled in) | the person, an admin |
+| Phone | **hidden** | the person, an admin |
+| Email | **hidden** | the person, an admin |
+| Picture | their photo | the person, an admin: *photo*, *company logo* or *initials* |
+
+Admins can switch a detail on or off for many people at once (People > "Visibility for many...", for everyone or one tenant). The admin Live Board always shows everything, whatever a person shares publicly. Search never matches phone numbers or emails.
+
+### Tenants and company logos
+
+Each tenant has a logo and company details (office, phone, email, website) shown on its section. Admins manage them under **Tenants**. An admin can also mark a person as a **tenant manager** (People > profile): that person can then keep their own company's logo and details up to date from `/me`, without being an admin.
+
+### Accessibility
+
+Built to be usable by everyone: full keyboard operation with visible focus and a skip link; screen-reader labels and live status announcements; every IN/OUT status carries a text label (never colour alone); 44px minimum touch targets; text that scales (browser zoom or the A / A+ / A++ control); light and dark colour schemes that meet contrast requirements; reduced-motion and high-contrast support; dialogs that trap and restore focus. The pages pass automated axe-core (WCAG 2.1 A/AA) checks in every layout.
 
 ## Admin dashboard
 
@@ -195,8 +222,9 @@ inout-board/
 ├── assets/
 │   └── board-design.jpg   # Original design reference photo
 ├── public/
-│   ├── index.html      # Public kiosk (search + IN/OUT)
-│   ├── kiosk.js
+│   ├── index.html      # Public board (all tenants, filters, layouts, IN/OUT)
+│   ├── home.js
+│   ├── prefs.js        # Applies the saved text size before first paint
 │   ├── me.html         # Person profile page (served at /me)
 │   ├── me.js
 │   ├── shared.js       # Avatars + client-side photo resize/upload
