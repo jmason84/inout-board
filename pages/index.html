@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IN/OUT Board: who's in, who's out</title>
+  <meta name="description" content="A simple, self-hosted in/out board for offices, plazas and shared buildings. Every tenant on one page, privacy by choice, five layouts, CSV import and export." />
+  <link rel="stylesheet" href="landing.css" />
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="hero">
+    <div class="wrap">
+      <h1><span class="dot" aria-hidden="true"></span>IN/OUT Board</h1>
+      <p>A simple, self-hosted board that shows who is in and who is out, for offices, plazas and shared buildings. Every tenant on one page, with each person choosing what they share.</p>
+      <div class="btns">
+        <a class="btn primary" href="app/index.html">Try the live demo</a>
+        <a class="btn ghost" href="https://github.com/jmason84/inout-board">View on GitHub</a>
+        <a class="btn ghost" href="#run-it">Run it yourself</a>
+      </div>
+    </div>
+  </header>
+
+  <main id="main" class="wrap">
+    <section aria-labelledby="features">
+      <h2 id="features">What it does</h2>
+      <p class="lead">Built for a building full of different businesses, where the front desk, the tenants and the visitors all need the same simple answer: is this person in right now?</p>
+      <div class="features">
+        <div class="feature"><h3>Every tenant on one page</h3><p>The public board lists each company with its logo, office and contact details, then its people with a clear IN / OUT status and one big button.</p></div>
+        <div class="feature"><h3>Privacy by choice</h3><p>Name, title, picture and status are always shown. Office, phone and email appear only when the person (or an admin) switches them on. Search never matches phone numbers.</p></div>
+        <div class="feature"><h3>Photo, logo or initials</h3><p>People pick which picture appears next to their name. Tenant managers keep their company's logo and details up to date themselves.</p></div>
+        <div class="feature"><h3>Five layouts</h3><p>Table, list, cards, tiles and the classic in/out board. Visitors choose; admins set the default. Large-text mode and dark mode included.</p></div>
+        <div class="feature"><h3>An admin console that stays out of the way</h3><p>Live board, tenants, people, time log with shifts and hours, manual corrections, CSV export, and per-admin accounts.</p></div>
+        <div class="feature"><h3>CSV import and export</h3><p>Load every person from a spreadsheet with a preview and a plain-English problem list before anything is written. Export everyone back out any time.</p></div>
+        <div class="feature"><h3>Accessible by design</h3><p>Keyboard friendly, screen-reader labels, text statuses instead of colour alone, big touch targets. Automated WCAG 2.1 AA checks pass on every page.</p></div>
+        <div class="feature"><h3>Self-hosted and dependency-free</h3><p>One Node.js process and one SQLite file. No database server, no <code>npm install</code>. Docker, systemd and backup scripts are included.</p></div>
+      </div>
+    </section>
+
+    <section aria-labelledby="board">
+      <h2 id="board">The public board</h2>
+      <p class="lead">Pick the layout that suits the screen: a directory table, a simple list, photo cards, or big touch tiles for a wall tablet.</p>
+      <div class="gallery">
+        <figure><img src="screenshots/home-table.png" alt="The board in table layout: tenant sections with logo, office, phone and email, and an IN or OUT button for each person" loading="lazy" /><figcaption><b>Table</b><span>A directory of every tenant, with contact details people chose to share.</span></figcaption></figure>
+        <figure><img src="screenshots/home-cards.png" alt="The board in cards layout showing a photo or logo for each person" loading="lazy" /><figcaption><b>Cards</b><span>Photo-forward cards that make people easy to recognise.</span></figcaption></figure>
+        <figure><img src="screenshots/home-tiles.png" alt="The board in tiles layout: large green and red tiles you tap to clock in or out" loading="lazy" /><figcaption><b>Tiles</b><span>Big colour-coded tiles for a wall-mounted tablet.</span></figcaption></figure>
+        <figure><img src="screenshots/home-board.png" alt="The board in classic in/out board layout with IN and OUT columns" loading="lazy" /><figcaption><b>Board</b><span>The classic in/out board, with IN and OUT columns.</span></figcaption></figure>
+        <figure><img src="screenshots/home-list.png" alt="The board in list layout, one person per row" loading="lazy" /><figcaption><b>List</b><span>One person per row. Compact and easy to scan.</span></figcaption></figure>
+        <figure><img src="screenshots/home-mobile.png" alt="The board on a phone" loading="lazy" /><figcaption><b>On a phone</b><span>Works on any screen size.</span></figcaption></figure>
+        <figure><img src="screenshots/home-dark.png" alt="The board in dark mode" loading="lazy" /><figcaption><b>Dark mode</b><span>Follows the device setting.</span></figcaption></figure>
+        <figure><img src="screenshots/home-large-text.png" alt="The board with large text turned on" loading="lazy" /><figcaption><b>Large text</b><span>A / A+ / A++ makes everything bigger, and the choice is remembered.</span></figcaption></figure>
+      </div>
+    </section>
+
+    <section aria-labelledby="people">
+      <h2 id="people">Each person controls their own profile</h2>
+      <p class="lead">People sign in to their own page to choose their picture and exactly which contact details others can see. A live preview shows how they will appear.</p>
+      <div class="gallery wide">
+        <figure><img src="screenshots/me-profile.png" alt="A person's own profile page with picture options, contact fields, visibility checkboxes and a live preview card" loading="lazy" /><figcaption><b>My profile</b><span>Photo, company logo or initials; office, phone and email shown only if ticked.</span></figcaption></figure>
+        <figure><img src="screenshots/admin-profile.png" alt="The admin's profile dialog for a person, with the same controls plus sign-in access" loading="lazy" /><figcaption><b>Admins can manage any profile</b><span>Including turning a person's sign-in on or off and marking tenant managers.</span></figcaption></figure>
+      </div>
+    </section>
+
+    <section aria-labelledby="admin">
+      <h2 id="admin">The admin console</h2>
+      <p class="lead">Everything an administrator needs, one click away, with the same keyboard-friendly, high-contrast design.</p>
+      <div class="gallery">
+        <figure><img src="screenshots/admin-overview.png" alt="Admin overview with counts of people in and out and a tenant table" loading="lazy" /><figcaption><b>Overview</b><span>Who is in right now, time logged today, recent activity.</span></figcaption></figure>
+        <figure><img src="screenshots/admin-live-board.png" alt="Admin live board listing every person with status" loading="lazy" /><figcaption><b>Live board</b><span>Everyone, in any layout, refreshing itself.</span></figcaption></figure>
+        <figure><img src="screenshots/admin-tenants.png" alt="Tenant cards with logos, contact details and in/out counts" loading="lazy" /><figcaption><b>Tenants</b><span>Logos, contact details and live counts for each company.</span></figcaption></figure>
+        <figure><img src="screenshots/admin-people.png" alt="People table with export and import CSV buttons" loading="lazy" /><figcaption><b>People</b><span>Search, edit, bulk visibility, and CSV import and export.</span></figcaption></figure>
+        <figure><img src="screenshots/admin-csv-import.png" alt="CSV import preview listing new, updated and skipped rows with plain-English problems" loading="lazy" /><figcaption><b>CSV import preview</b><span>See exactly what will change, and which rows have problems, before anything is saved.</span></figcaption></figure>
+        <figure><img src="screenshots/admin-time-log.png" alt="Time log showing each person's shifts and durations" loading="lazy" /><figcaption><b>Time log</b><span>Shifts and hours by person or tenant, with CSV export and manual corrections.</span></figcaption></figure>
+        <figure><img src="screenshots/admin-settings.png" alt="Settings page for the default layout and whether the board shows everyone or search only" loading="lazy" /><figcaption><b>Settings</b><span>Default layout, and whether the board shows everyone or is search-only.</span></figcaption></figure>
+      </div>
+    </section>
+
+    <section id="run-it" aria-labelledby="run">
+      <h2 id="run">Run it yourself</h2>
+      <p class="lead">It is one Node.js process (22.5 or newer) and one SQLite file. The fastest way is Docker:</p>
+<pre><code>git clone https://github.com/jmason84/inout-board.git
+cd inout-board
+cp .env.example .env        # set ADMIN_USER and a strong ADMIN_PASSWORD
+docker compose up -d        # then open http://localhost:3000</code></pre>
+      <p>Or with plain Node, no install step:</p>
+<pre><code>ADMIN_USER=admin ADMIN_PASSWORD='a-long-passphrase' node server.js</code></pre>
+      <p>The <a href="https://github.com/jmason84/inout-board/blob/main/DEPLOY.md">deployment guide</a> covers HTTPS, Cloudflare Tunnel, systemd, backups and upgrades.</p>
+      <p class="note"><b>About this demo.</b> GitHub Pages can only serve static files, so this demo runs the real front end against a small backend that lives in your browser, using made-up people and companies. Nothing you do here is sent anywhere, and the banner has a Reset button. CSV import and a few security features are switched off in the demo; the real server has them all.</p>
+    </section>
+  </main>
+
+  <footer class="wrap">IN/OUT Board &middot; <a href="https://github.com/jmason84/inout-board">Source on GitHub</a> &middot; <a href="app/index.html">Live demo</a></footer>
+</body>
+</html>

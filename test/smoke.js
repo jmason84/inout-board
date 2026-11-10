@@ -208,6 +208,87 @@ async function t(name, fn) {
     assert.notEqual((await call('GET', '/photos/../data/inout.sqlite', undefined, { jar: false })).status, 200);
   });
 
+  await t('CSV export: admin only, UTF-8 BOM, every person with their settings', async () => {
+    assert.equal((await call('GET', '/api/people.csv', undefined, { jar: false })).status, 401);
+    const r = await call('GET', '/api/people.csv');
+    assert.equal(r.status, 200);
+    assert.match(r.headers.get('content-type'), /text\/csv/);
+    const raw = new Uint8Array(await (await fetch(BASE + '/api/people.csv', { headers: { Cookie: cookie } })).arrayBuffer());
+    assert.deepEqual([raw[0], raw[1], raw[2]], [0xef, 0xbb, 0xbf], 'UTF-8 BOM so Excel reads accents correctly');
+    const lines = r.data.replace(/^﻿/, '').trim().split(/\r\n/);
+    assert.equal(lines[0], 'id,name,tenant,title,office,phone,email,active,show_office,show_phone,show_email,avatar_mode,manager,bio');
+    assert.ok(lines.length >= 12, 'seeded roster + Dana');
+    assert.ok(lines.some((l) => l.includes('Dana Whitfield')));
+  });
+
+  await t('CSV import: dry run changes nothing; apply creates, updates, creates tenants, reports bad rows', async () => {
+    const countPeople = async () => (await call('GET', '/api/people')).data.length;
+    const before = await countPeople();
+    const danaId = personId;
+    const csv = [
+      'Name,Company,Job Title,Phone,Email,Show Phone,Active',
+      'Ana "The Boss" Lopez,CSV Co,"Owner, CEO",605-555-1111,ana@csv.example,yes,yes',
+      'Bo Chen,CSV Co,Analyst,,bo@csv.example,no,',
+      ',CSV Co,Nobody,,,,',
+      'Cy Dunn,CSV Co,Intern,,not-an-email,,',
+      'Di Evans,CSV Co,Intern,,,maybe,',
+      'Dana Whitfield,Plaza North 2,Senior Lead,605-555-9999,,,',
+    ].join('\r\n');
+    const post = (q) => call('POST', '/api/people/import' + q, csv, { raw: true, headers: { 'Content-Type': 'text/csv' } });
+
+    assert.equal((await call('POST', '/api/people/import', csv, { raw: true, jar: false, headers: { 'Content-Type': 'text/csv' } })).status, 401);
+    const dry = (await post('?dry_run=1')).data;
+    assert.equal(dry.dry_run, true);
+    assert.equal(dry.created, 2); assert.equal(dry.updated, 1); assert.equal(dry.skipped, 3);
+    assert.deepEqual(dry.tenants_created, ['CSV Co']);
+    assert.deepEqual(dry.errors.map((e) => e.row).sort(), [4, 5, 6]);
+    assert.equal(await countPeople(), before, 'dry run wrote nothing');
+    assert.equal((await call('GET', '/api/tenants')).data.some((x) => x.name === 'CSV Co'), false);
+
+    const real = (await post('')).data;
+    assert.equal(real.created, 2); assert.equal(real.updated, 1);
+    assert.equal(await countPeople(), before + 2);
+    const people = (await call('GET', '/api/people')).data;
+    const ana = people.find((p) => p.name === 'Ana "The Boss" Lopez');
+    assert.equal(ana.title, 'Owner, CEO'); assert.equal(ana.show_phone, true); assert.equal(ana.tenant_name, 'CSV Co');
+    const bo = people.find((p) => p.name === 'Bo Chen'); assert.equal(bo.show_phone, false);
+    const dana = (await call('GET', `/api/people/${danaId}`)).data;
+    assert.equal(dana.title, 'Senior Lead'); assert.equal(dana.phone, '605-555-9999');
+    assert.equal(dana.office, 'Suite 9', 'a column that is not in the file is left alone');
+    assert.equal(dana.email, '', 'a column that IS in the file is authoritative: a blank cell clears the value');
+    // importing the same file again updates instead of duplicating
+    const again = (await post('')).data;
+    assert.equal(again.created, 0); assert.equal(again.updated, 3);
+    assert.equal(await countPeople(), before + 2);
+  });
+
+  await t('CSV import: semicolons, default tenant, quoted newlines, id matching, round trip with formula guard', async () => {
+    const tenants = (await call('GET', '/api/tenants')).data;
+    const tid = tenants.find((x) => x.name === 'CSV Co').id;
+    const post = (csv, q = '') => call('POST', '/api/people/import' + q, csv, { raw: true, headers: { 'Content-Type': 'text/csv' } });
+    // no tenant column and no default -> every row rejected
+    const none = (await post('name;phone\nEd Fox;1')).data;
+    assert.equal(none.created, 0); assert.equal(none.skipped, 1);
+    // with a default tenant, semicolon separated, quoted newline in the bio
+    const ok = (await post('name;bio;phone\nEd Fox;"line1\nline2";+1 605 555 0000', `?default_tenant_id=${tid}`)).data;
+    assert.equal(ok.created, 1);
+    const ed = (await call('GET', '/api/people')).data.find((p) => p.name === 'Ed Fox');
+    assert.equal(ed.tenant_name, 'CSV Co'); assert.equal(ed.phone, '+1 605 555 0000');
+    // export guards '+' against spreadsheet formulas; importing the export restores the original text
+    const exp = (await call('GET', '/api/people.csv')).data;
+    assert.ok(exp.includes("'+1 605 555 0000"), 'leading + is neutralised in the export');
+    const back = (await post(exp)).data;
+    assert.equal(back.created, 0); assert.equal(back.errors.length, 0);
+    assert.equal((await call('GET', '/api/people')).data.find((p) => p.name === 'Ed Fox').phone, '+1 605 555 0000');
+    // matching by id moves a person to another tenant
+    const main = tenants.find((x) => x.name === 'Main Office');
+    await post(`id,name,tenant\n${ed.id},Ed Fox,Main Office`);
+    assert.equal((await call('GET', '/api/people')).data.find((p) => p.name === 'Ed Fox').tenant_id, main.id);
+    // garbage in
+    assert.equal((await post('just one line')).status, 400);
+    assert.equal((await post('foo,bar\n1,2')).status, 400);
+  });
+
   await t('logout ends the session', async () => {
     await call('POST', '/api/auth/logout');
     assert.equal((await call('GET', '/api/tenants')).status, 401);

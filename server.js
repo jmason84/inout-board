@@ -573,8 +573,8 @@ function csvEscape(v) {
   return /[",\n\r]/.test(safe) ? '"' + safe.replace(/"/g, '""') + '"' : safe;
 }
 
-function sendCSV(res, filename, header, rows) {
-  const body = [header, ...rows].map((r) => r.map(csvEscape).join(',')).join('\r\n') + '\r\n';
+function sendCSV(res, filename, header, rows, { bom = false } = {}) {
+  const body = (bom ? '\uFEFF' : '') + [header, ...rows].map((r) => r.map(csvEscape).join(',')).join('\r\n') + '\r\n';
   res.writeHead(200, {
     'Content-Type': 'text/csv; charset=utf-8',
     'Content-Disposition': `attachment; filename="${filename}"`,
@@ -817,6 +817,160 @@ function getSettings() {
   for (const r of db.prepare('SELECT key, value FROM settings').all()) {
     if (SETTING_OPTIONS[r.key] && SETTING_OPTIONS[r.key].includes(r.value)) out[r.key] = r.value;
   }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// People CSV: export + import (admin)
+// ---------------------------------------------------------------------------
+
+const CSV_COLUMNS = ['id', 'name', 'tenant', 'title', 'office', 'phone', 'email', 'active',
+  'show_office', 'show_phone', 'show_email', 'avatar_mode', 'manager', 'bio'];
+
+// Friendly header names people actually use in spreadsheets -> our field names.
+const CSV_ALIASES = {
+  'id': 'id',
+  'name': 'name', 'full name': 'name', 'person': 'name', 'employee': 'name',
+  'tenant': 'tenant', 'company': 'tenant', 'business': 'tenant', 'organization': 'tenant', 'organisation': 'tenant',
+  'title': 'title', 'job title': 'title', 'role': 'title', 'position': 'title',
+  'office': 'office', 'suite': 'office', 'office suite': 'office', 'room': 'office',
+  'phone': 'phone', 'telephone': 'phone', 'mobile': 'phone', 'cell': 'phone',
+  'email': 'email', 'e mail': 'email', 'email address': 'email',
+  'active': 'active',
+  'show office': 'show_office', 'show phone': 'show_phone', 'show email': 'show_email',
+  'avatar': 'avatar_mode', 'avatar mode': 'avatar_mode', 'picture': 'avatar_mode',
+  'manager': 'manager', 'tenant manager': 'manager',
+  'bio': 'bio',
+};
+
+// RFC 4180 style: quoted fields, doubled quotes, CRLF/LF, BOM, comma / semicolon / tab separated.
+function parseCSV(text) {
+  text = String(text).replace(/^﻿/, '');
+  const firstLine = text.split(/\r?\n/, 1)[0];
+  const counts = { ',': 0, ';': 0, '\t': 0 };
+  let inQ = false;
+  for (const ch of firstLine) { if (ch === '"') inQ = !inQ; else if (!inQ && ch in counts) counts[ch]++; }
+  const best = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+  const delim = best[1] > 0 ? best[0] : ',';
+  const rows = [];
+  let row = [], field = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) {
+      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else q = false; } else field += c;
+    } else if (c === '"' && field === '') q = true;     // a quote only opens a quoted field at its start; elsewhere it is literal
+    else if (c === delim) { row.push(field); field = ''; }
+    else if (c === '\n' || c === '\r') { if (c === '\r' && text[i + 1] === '\n') i++; row.push(field); field = ''; rows.push(row); row = []; }
+    else field += c;
+  }
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  return rows.filter((r) => r.some((v) => String(v).trim() !== ''));
+}
+
+function parseYesNo(v) {
+  const t = String(v).trim().toLowerCase();
+  if (t === '') return undefined;                         // blank = leave as is
+  if (['yes', 'y', 'true', '1', 'x', 'on', 'shown', 'show'].includes(t)) return 1;
+  if (['no', 'n', 'false', '0', 'off', 'hidden', 'hide'].includes(t)) return 0;
+  return null;                                            // not understood
+}
+
+// dryRun=true validates and counts without writing anything.
+function importPeople(csvText, { dryRun, defaultTenantId }) {
+  const rows = parseCSV(csvText);
+  if (rows.length < 2) return { error: 'The file needs a header row and at least one person.' };
+  if (rows.length - 1 > 5000) return { error: 'That is more than 5,000 rows. Please split the file.' };
+  const header = rows[0].map((h) => CSV_ALIASES[String(h).trim().toLowerCase().replace(/[_\-./]+/g, ' ').replace(/\s+/g, ' ')] || null);
+  if (!header.includes('name')) return { error: 'The first row must have a "name" column.' };
+  const unknownCols = rows[0].filter((_, i) => !header[i]).map((h) => String(h).trim()).filter(Boolean);
+
+  const tenantIds = new Map(db.prepare('SELECT id, name FROM tenants').all().map((t) => [t.name.toLowerCase(), t.id]));
+  const peopleById = new Map(db.prepare('SELECT id, tenant_id, name FROM people').all().map((p) => [p.id, p]));
+  const peopleByKey = new Map(db.prepare('SELECT id, tenant_id, name FROM people').all().map((p) => [p.tenant_id + '|' + p.name.toLowerCase(), p.id]));
+
+  const out = { dry_run: !!dryRun, created: 0, updated: 0, skipped: 0, errors: [], tenants_created: [], ignored_columns: unknownCols };
+  const plan = [];
+  const newTenants = new Map(); // lower name -> display name
+
+  for (let r = 1; r < rows.length; r++) {
+    const rowNum = r + 1;
+    const rec = {};
+    header.forEach((k, i) => {
+      if (!k || rows[r][i] === undefined) return;
+      let v = String(rows[r][i]).trim();
+      if (/^'[=+\-@]/.test(v)) v = v.slice(1);            // undo the export's spreadsheet-formula guard
+      rec[k] = v;
+    });
+    const fail = (message) => { out.errors.push({ row: rowNum, message }); out.skipped++; };
+
+    if (!rec.name) { fail('Name is empty.'); continue; }
+    if (rec.name.length > 120) { fail('Name is longer than 120 characters.'); continue; }
+
+    let tenantId = null;
+    let tenantName = rec.tenant || '';
+    if (tenantName) {
+      tenantId = tenantIds.get(tenantName.toLowerCase()) || null;
+      if (!tenantId) newTenants.set(tenantName.toLowerCase(), tenantName);
+    } else if (rec.id && peopleById.has(Number(rec.id))) {
+      tenantId = peopleById.get(Number(rec.id)).tenant_id;          // keep the current tenant
+    } else if (defaultTenantId) {
+      tenantId = defaultTenantId;
+    } else { fail('No tenant. Add a "tenant" column, or choose a default tenant when importing.'); continue; }
+
+    const body = {};
+    for (const k of ['title', 'office', 'phone', 'email', 'bio']) if (rec[k] !== undefined) body[k] = rec[k];
+    let bad = null;
+    for (const k of ['show_office', 'show_phone', 'show_email', 'manager']) {
+      if (rec[k] === undefined) continue;
+      const b = parseYesNo(rec[k]);
+      if (b === null) { bad = `"${k.replace('_', ' ')}" must be yes or no (found "${rec[k]}").`; break; }
+      if (b !== undefined) body[k === 'manager' ? 'is_manager' : k] = b;
+    }
+    if (bad) { fail(bad); continue; }
+    let active;
+    if (rec.active !== undefined) {
+      active = parseYesNo(rec.active);
+      if (active === null) { fail(`"active" must be yes or no (found "${rec.active}").`); continue; }
+    }
+    if (rec.avatar_mode) {
+      const m = rec.avatar_mode.toLowerCase();
+      const mode = m.includes('logo') ? 'logo' : m.includes('initial') ? 'initials' : m.includes('photo') ? 'photo' : null;
+      if (!mode) { fail('"avatar" must be photo, logo or initials.'); continue; }
+      body.avatar_mode = mode;
+    }
+    const prof = cleanProfile(body, { admin: true });
+    if (prof.error) { fail(prof.error.charAt(0).toUpperCase() + prof.error.slice(1) + '.'); continue; }
+
+    let existingId = null;
+    if (rec.id && peopleById.has(Number(rec.id))) existingId = Number(rec.id);
+    else if (tenantId) existingId = peopleByKey.get(tenantId + '|' + rec.name.toLowerCase()) || null;
+    if (existingId) out.updated++; else out.created++;
+    plan.push({ existingId, tenantId, tenantName, name: rec.name, fields: prof.fields, active });
+  }
+
+  out.tenants_created = [...newTenants.values()];
+  if (dryRun || !plan.length) return out;
+
+  db.exec('BEGIN');
+  try {
+    for (const [lower, display] of newTenants) {
+      const id = Number(db.prepare('INSERT INTO tenants (name, notes, created_at) VALUES (?, ?, ?)').run(display, 'Created by CSV import', nowMs()).lastInsertRowid);
+      tenantIds.set(lower, id);
+    }
+    for (const p of plan) {
+      const tid = p.tenantId || tenantIds.get(p.tenantName.toLowerCase());
+      if (p.existingId) {
+        db.prepare('UPDATE people SET name = ?, tenant_id = ?' + (p.active === undefined ? '' : ', active = ?') + ' WHERE id = ?')
+          .run(...[p.name, tid, ...(p.active === undefined ? [] : [p.active]), p.existingId]);
+        updateProfileFields(p.existingId, p.fields);
+      } else {
+        const id = Number(db.prepare('INSERT INTO people (tenant_id, name, phone, active, created_at) VALUES (?, ?, ?, ?, ?)')
+          .run(tid, p.name, '', p.active === undefined ? 1 : p.active, nowMs()).lastInsertRowid);
+        updateProfileFields(id, p.fields);
+      }
+    }
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
   return out;
 }
 
@@ -1215,6 +1369,33 @@ const server = http.createServer(async (req, res) => {
         .run(Number(body.tenant_id), String(body.name || '').trim(), body.active ? 1 : 0, id);
       updateProfileFields(id, prof.fields);
       return sendJSON(res, 200, { ok: true });
+    }
+
+    // ---- People CSV ----------------------------------------------------------
+    if (route === 'GET /api/people.csv') {
+      if (!requireAdmin(res, req)) return;
+      const rows = db.prepare(`
+        SELECT p.id, p.name, t.name AS tenant, p.title, p.office, p.phone, p.email, p.active,
+               p.show_office, p.show_phone, p.show_email, p.avatar_mode, p.is_manager, p.bio
+        FROM people p JOIN tenants t ON t.id = p.tenant_id
+        ORDER BY t.name COLLATE NOCASE, p.name COLLATE NOCASE
+      `).all();
+      const yn = (v) => (v ? 'yes' : 'no');
+      return sendCSV(res, 'people.csv', CSV_COLUMNS, rows.map((p) => [
+        p.id, p.name, p.tenant, p.title, p.office, p.phone, p.email, yn(p.active),
+        yn(p.show_office), yn(p.show_phone), yn(p.show_email), p.avatar_mode, yn(p.is_manager), p.bio,
+      ]), { bom: true });
+    }
+
+    if (route === 'POST /api/people/import') {
+      if (!requireAdmin(res, req)) return;
+      const text = (await readRaw(req, 2_000_000)).toString('utf8');
+      let defaultTenantId = Number(url.searchParams.get('default_tenant_id')) || null;
+      if (defaultTenantId && !db.prepare('SELECT id FROM tenants WHERE id = ?').get(defaultTenantId)) {
+        return sendJSON(res, 400, { error: 'default tenant does not exist' });
+      }
+      const result = importPeople(text, { dryRun: url.searchParams.get('dry_run') === '1', defaultTenantId });
+      return result.error ? sendJSON(res, 400, { error: result.error }) : sendJSON(res, 200, result);
     }
 
     // ---- Clock in / out ----------------------------------------------------

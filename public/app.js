@@ -399,6 +399,76 @@ async function editPerson(p) {
   else toast((await json(res)).error || 'Failed', true);
 }
 
+// ---- CSV export / import ---------------------------------------------------
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = Object.assign(document.createElement('a'), { href: url, download: filename });
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+$('#exportPeopleBtn').addEventListener('click', async () => {
+  const res = await adminFetch('/api/people.csv');
+  if (!res.ok) return toast('Export failed', true);
+  downloadBlob(await res.blob(), 'people.csv');
+  toast('Exported all people');
+});
+
+$('#templatePeopleBtn').addEventListener('click', () => {
+  const csv = '﻿name,tenant,title,office,phone,email,active,show_office,show_phone,show_email,avatar_mode,manager,bio\r\n'
+    + 'Jane Smith,Main Office,Office Manager,Suite 100,605-555-0100,jane@example.com,yes,yes,yes,no,photo,no,\r\n';
+  downloadBlob(new Blob([csv], { type: 'text/csv' }), 'people-template.csv');
+});
+
+function importSummary(d) {
+  const lines = [`${d.created} new, ${d.updated} updated, ${d.skipped} skipped.`];
+  if (d.tenants_created.length) lines.push(`New tenants will be created: ${d.tenants_created.join(', ')}.`);
+  if (d.ignored_columns.length) lines.push(`Columns not recognised and ignored: ${d.ignored_columns.join(', ')}.`);
+  if (d.errors.length) {
+    lines.push('', 'Problems (these rows are skipped):');
+    d.errors.slice(0, 8).forEach((e) => lines.push(`  Row ${e.row}: ${e.message}`));
+    if (d.errors.length > 8) lines.push(`  …and ${d.errors.length - 8} more.`);
+  }
+  return lines.join('\n');
+}
+
+$('#importPeopleFile').addEventListener('change', async (e) => {
+  const file = e.target.files[0]; e.target.value = '';
+  if (!file) return;
+  if (file.size > 2000000) return toast('That file is over 2 MB. Please split it.', true);
+  const text = await file.text();
+  await refreshTenantsCache();
+  const send = (qs) => adminFetch('/api/people/import?' + qs, { method: 'POST', body: text, headers: { 'Content-Type': 'text/csv' } });
+
+  let extra = '';
+  let res = await send('dry_run=1');
+  let d = await json(res);
+  if (!res.ok) return toast(d.error || 'Could not read that file', true);
+
+  // Nothing had a tenant: offer to put everyone in one.
+  if (!d.created && !d.updated && d.errors.some((x) => /No tenant/.test(x.message)) && tenantsCache.length) {
+    const pick = await openModal('Which tenant are these people in?', [
+      { name: 'tenant_id', label: 'The file has no "tenant" column. Put everyone in:', type: 'select', value: tenantsCache[0].id,
+        options: tenantsCache.map((t) => ({ value: t.id, label: t.name })) },
+    ], 'Continue');
+    if (!pick) return;
+    extra = `&default_tenant_id=${pick.tenant_id}`;
+    res = await send('dry_run=1' + extra); d = await json(res);
+    if (!res.ok) return toast(d.error || 'Could not read that file', true);
+  }
+  if (!d.created && !d.updated) {
+    await confirmModal('Nothing to import', importSummary(d), 'OK');
+    return;
+  }
+  if (!await confirmModal(`Import ${file.name}?`, importSummary(d), `Import ${d.created + d.updated} people`)) return;
+  res = await send('dry_run=0' + extra);
+  d = await json(res);
+  if (!res.ok) return toast(d.error || 'Import failed', true);
+  toast(`Imported: ${d.created} new, ${d.updated} updated`);
+  await refreshTenantsCache();
+  loadPeople();
+});
+
 $('#bulkVisBtn').addEventListener('click', async () => {
   await refreshTenantsCache();
   const v = await openModal('Visibility for many people', [

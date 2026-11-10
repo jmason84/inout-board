@@ -283,3 +283,5 @@ td.hint { text-align: center; padding: 1.5rem; }
   .dtable.stack td.cell-person { grid-column: 1 / -1; }
   .dtable.stack td.cell-act { grid-column: 2; grid-row: 1; text-align: right; }
 }
+
+.modal p { white-space: pre-line; }
