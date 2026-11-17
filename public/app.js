@@ -871,6 +871,7 @@ async function loadSettings() {
   $('#layoutOpts').innerHTML = radio('kiosk_layout', IO.LAYOUTS, st.kiosk_layout);
   $('#modeOpts').innerHTML = radio('kiosk_mode', MODES, st.kiosk_mode);
   // Theme: show server default, but apply the localStorage override for this browser.
+  if (window.IOPrefs) IOPrefs.applyDefaultTheme(st.theme);
   const browserTheme = window.IOPrefs ? IOPrefs.getTheme() : st.theme;
   $('#themeOpts').innerHTML = radio('theme', THEMES, browserTheme);
 }
@@ -878,11 +879,9 @@ async function loadSettings() {
 $('#admin-settings').addEventListener('change', async (e) => {
   const input = e.target.closest('input[type=radio]');
   if (!input) return;
-  // Theme is saved to both the server (default for new browsers) and localStorage (this browser).
-  if (input.name === 'theme' && window.IOPrefs) {
-    IOPrefs.setTheme(input.value);
-  }
   const res = await adminFetch('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ [input.name]: input.value }) });
+  // Only persist the local choice after the server accepts the setting.
+  if (res.ok && input.name === 'theme' && window.IOPrefs) IOPrefs.setTheme(input.value);
   if (res.ok) { toast('Saved'); await loadSettings(); const again = document.querySelector(`input[name="${input.name}"][value="${input.value}"]`); if (again) again.focus(); } else toast((await json(res)).error || 'Could not save', true);
 });
 

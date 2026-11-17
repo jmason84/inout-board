@@ -873,66 +873,8 @@ function photosForTenant(tenantId) {
 // GitHub update check (cached, rate-limit safe)
 // ---------------------------------------------------------------------------
 
-let _updateCache = { ts: 0, data: null };
-const UPDATE_CACHE_MS = 60 * 60 * 1000; // 1 hour
-
-function semverCompare(a, b) {
-  const pa = a.replace(/^v/, '').split('.').map(Number);
-  const pb = b.replace(/^v/, '').split('.').map(Number);
-  for (let i = 0; i < 3; i++) {
-    if ((pa[i] || 0) < (pb[i] || 0)) return -1;
-    if ((pa[i] || 0) > (pb[i] || 0)) return 1;
-  }
-  return 0;
-}
-
-function checkForUpdate() {
-  const now = Date.now();
-  if (_updateCache.data && now - _updateCache.ts < UPDATE_CACHE_MS) {
-    return Promise.resolve(_updateCache.data);
-  }
-  return new Promise((resolve, reject) => {
-    const reqOpts = {
-      hostname: 'api.github.com',
-      path: '/repos/jmason84/inout-board/releases/latest',
-      method: 'GET',
-      headers: { 'User-Agent': `InOutBoard/${PKG_VERSION}`, Accept: 'application/vnd.github+json' },
-      timeout: 8000,
-    };
-    const ghReq = https.request(reqOpts, (ghRes) => {
-      let body = '';
-      ghRes.on('data', (c) => { body += c; });
-      ghRes.on('end', () => {
-        try {
-          if (ghRes.statusCode === 404) {
-            const result = { update_available: false, current_version: PKG_VERSION };
-            _updateCache = { ts: now, data: result };
-            return resolve(result);
-          }
-          if (ghRes.statusCode !== 200) {
-            return reject(new Error(`GitHub API returned ${ghRes.statusCode}`));
-          }
-          const rel = JSON.parse(body);
-          const latest = rel.tag_name || '';
-          const newer = semverCompare(PKG_VERSION, latest) < 0;
-          const result = {
-            update_available: newer,
-            current_version: PKG_VERSION,
-            latest_version: latest.replace(/^v/, ''),
-            release_name: rel.name || '',
-            release_url: rel.html_url || '',
-            published_at: rel.published_at || '',
-          };
-          _updateCache = { ts: now, data: result };
-          resolve(result);
-        } catch (e) { reject(e); }
-      });
-    });
-    ghReq.on('error', reject);
-    ghReq.on('timeout', () => { ghReq.destroy(); reject(new Error('timeout')); });
-    ghReq.end();
-  });
-}
+const { createUpdateChecker } = require('./scripts/update-check');
+const checkForUpdate = createUpdateChecker({ version: PKG_VERSION });
 
 // ---------------------------------------------------------------------------
 // Settings (admin-controlled, whitelisted)
@@ -1112,7 +1054,9 @@ function importPeople(csvText, { dryRun, defaultTenantId }) {
 // ---------------------------------------------------------------------------
 
 async function handleRequest(req, res) {
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  let url;
+  try { url = new URL(req.url, `http://${req.headers.host || 'localhost'}`); }
+  catch { return sendJSON(res, 400, { error: 'Invalid request URL or Host' }); }
   // Normalise /api/<resource>/<numeric id> to /api/<resource>/:id for routing.
   const idMatch = url.pathname.match(/^\/api\/(tenants|people|events|admin\/users)\/(\d+)$/);
   const subMatch = url.pathname.match(/^\/api\/(people|tenants)\/(\d+)\/(photo|access|logo)$/);

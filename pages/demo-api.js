@@ -181,7 +181,7 @@
 
   R('GET', /^\/directory$/, (m, q) => {
     const st = S.settings, query = (q.get('q') || '').trim(), tid = Number(q.get('tenant_id')) || null;
-    const base = { layout: st.kiosk_layout, mode: st.kiosk_mode };
+    const base = { layout: st.kiosk_layout, mode: st.kiosk_mode, theme: st.theme || 'system' };
     if (!query && st.kiosk_mode !== 'browse') return J({ ...base, tenants: [] });
     const groups = [];
     for (const t of [...S.tenants].sort((a, b) => a.name.localeCompare(b.name))) {
@@ -214,10 +214,11 @@
   R('DELETE', /^\/admin\/users\/\d+$/, () => needAdmin() || notInDemo('Removing admins'));
 
   // ---- admin: settings / overview / status
-  R('GET', /^\/admin\/settings$/, () => needAdmin() || J(S.settings));
+  R('GET', /^\/admin\/settings$/, () => needAdmin() || J({ theme: 'system', ...S.settings }));
+  R('GET', /^\/admin\/update-check$/, () => needAdmin() || J({ update_available: false, current_version: 'demo' }));
   R('PUT', /^\/admin\/settings$/, (m, q, b) => {
     const bad = needAdmin(); if (bad) return bad;
-    const opts = { kiosk_layout: ['table', 'list', 'cards', 'tiles', 'board'], kiosk_mode: ['search', 'browse'] };
+    const opts = { kiosk_layout: ['table', 'list', 'cards', 'tiles', 'board'], kiosk_mode: ['search', 'browse'], theme: ['light', 'dark', 'system'] };
     for (const [k, v] of Object.entries(b)) { if (!opts[k]) return ERR(400, `Unknown setting: ${k}`); if (!opts[k].includes(v)) return ERR(400, `Invalid value for ${k}`); S.settings[k] = v; }
     save(); return J(S.settings);
   });

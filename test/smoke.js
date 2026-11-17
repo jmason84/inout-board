@@ -9,6 +9,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const assert = require('node:assert/strict');
+const http = require('node:http');
 
 const PORT = 3900 + Math.floor(Math.random() * 90);
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -225,6 +226,17 @@ async function t(name, fn) {
     const r = await call('GET', '/', undefined, { jar: false });
     assert.match(r.headers.get('content-security-policy'), /default-src 'self'/);
     assert.notEqual((await call('GET', '/photos/../data/inout.sqlite', undefined, { jar: false })).status, 200);
+  });
+
+  await t('malformed Host is rejected without crashing the server', async () => {
+    const status = await new Promise((resolve, reject) => {
+      const req = http.get(BASE + '/api/health', { headers: { Host: '[' } }, (res) => {
+        res.resume(); res.on('end', () => resolve(res.statusCode));
+      });
+      req.on('error', reject);
+    });
+    assert.equal(status, 400);
+    assert.equal((await call('GET', '/api/health')).data.ok, true);
   });
 
   await t('CSV export: admin only, UTF-8 BOM, every person with their settings', async () => {

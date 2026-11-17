@@ -42,7 +42,7 @@
     <CustomAction Id="RemoveBoard" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="ignore"
       ExeCommand="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]InOutBoard.ps1&quot; -Action Remove" />
 
-    <CustomAction Id="PurgeBoard" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="ignore"
+    <CustomAction Id="PurgeBoard" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="check"
       ExeCommand="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]InOutBoard.ps1&quot; -Action Purge" />
 
     <CustomAction Id="ConfigureBoard" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="check"
@@ -65,7 +65,7 @@
       <!-- Fresh install only (not upgrade): reset admin to admin/admin so reinstalling over old data
            always gives the documented first-login experience. Return="ignore" so a missing DB (truly
            fresh) does not fail the install. -->
-      <Custom Action="ResetAdminOnInstall" After="ConfigureBoard" Condition="NOT REMOVE AND NOT WIX_UPGRADE_DETECTED" />
+      <Custom Action="ResetAdminOnInstall" After="ConfigureBoard" Condition="NOT Installed AND NOT REMOVE AND NOT WIX_UPGRADE_DETECTED" />
     </InstallExecuteSequence>
   </Package>
 </Wix>

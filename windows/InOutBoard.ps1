@@ -167,7 +167,7 @@ function Stop-OurProcesses {
 }
 
 function Stop-Board {
-  foreach ($t in @($TaskApp, $TaskTls)) {
+  foreach ($t in @($TaskApp, $TaskTls, $TaskBackup)) {
     try { Stop-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue } catch { }
   }
   Start-Sleep -Milliseconds 500
@@ -396,11 +396,12 @@ ADMIN_PASSWORD=admin
     if (Test-Path $DataRoot) {
       Write-Log "Removing all data in $DataRoot"
       Remove-Item -Recurse -Force $DataRoot
-      Write-Log 'Data directory removed'
+      Write-Host 'Data directory removed'
     } else {
-      Write-Log "Data directory $DataRoot does not exist — nothing to purge"
+      Write-Host "Data directory $DataRoot does not exist - nothing to purge"
     }
-    Write-Log 'Purge complete. All IN/OUT Board data has been removed.'
+    # Logging to disk here would recreate the directory we just purged.
+    Write-Host 'Purge complete. All IN/OUT Board data has been removed.'
   }
 
   'Stop'    { Stop-Board; Write-Log 'Stopped' }
