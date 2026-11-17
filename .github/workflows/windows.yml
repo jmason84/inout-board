@@ -186,8 +186,17 @@ jobs:
           if ($p.ExitCode -eq 0) { throw 'corrupt installer was accepted' }
           if (-not (Invoke-RestMethod https://127.0.0.1:8443/api/health).ok) { throw 'failed verification interrupted the board' }
           $args = $args.Replace($wrong, $hash)
-          $p = Start-Process $ps -ArgumentList $args -Wait -PassThru
-          if ($p.ExitCode -ne 0) { Get-Content "$root\updates\status.json"; Get-Content "$root\updates\installer.log" -Tail 100 -ErrorAction SilentlyContinue; throw 'update worker failed' }
+          # Launch through its own SYSTEM scheduled task, as the browser updater does.
+          $launcher = "$installDir\windows-launch-update.ps1"
+          @{ state='prepared' } | ConvertTo-Json | Set-Content "$root\updates\status.json"
+          $launchArgs = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$launcher`" -WorkerPath `"$worker`" -MsiPath `"$msi`" -ExpectedHash $hash -Version $newVersion -DataRoot `"$root`" -InstallDir `"$installDir`""
+          $p = Start-Process $ps -ArgumentList $launchArgs -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content "$root\updates\status.json"; throw 'update launcher failed' }
+          for ($i = 0; $i -lt 120; $i++) {
+            $progress = Get-Content "$root\updates\status.json" -Raw | ConvertFrom-Json
+            if ($progress.state -in @('complete','error')) { break }
+            Start-Sleep -Seconds 1
+          }
           $status = Get-Content "$root\updates\status.json" -Raw | ConvertFrom-Json
           if ($status.state -ne 'complete') { throw 'update did not complete' }
           if ((Get-Content "$installDir\package.json" -Raw | ConvertFrom-Json).version -ne $newVersion) { throw 'installed version did not change' }

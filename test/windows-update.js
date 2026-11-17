@@ -51,6 +51,7 @@ function fixture(t, { corrupt = false, supported = true, missing = false, launch
   const hash = crypto.createHash('sha256').update(bytes).digest('hex');
   const prefix = 'https://github.com/jmason84/inout-board/releases/download/v1.2.3/';
   fs.writeFileSync(path.join(root, 'windows-update.ps1'), '# isolated test worker');
+  fs.writeFileSync(path.join(root, 'windows-launch-update.ps1'), '# isolated test launcher');
   let launched = 0, launchArgs;
   const update = createWindowsUpdater({ root, installDir: root, supported,
     check: async () => ({ update_available: !missing, installable: true, latest_version: '1.2.3',
@@ -61,7 +62,7 @@ function fixture(t, { corrupt = false, supported = true, missing = false, launch
     launch(exe, args, options) {
       launched++; launchArgs = { exe, args, options };
       const child = new EventEmitter(); child.unref = () => {};
-      queueMicrotask(() => child.emit(launchError ? 'error' : 'spawn', launchError ? new Error('spawn failed') : undefined));
+      queueMicrotask(() => child.emit(launchError ? 'error' : 'exit', launchError ? new Error('spawn failed') : 0));
       return child;
     },
   });

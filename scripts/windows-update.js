@@ -114,14 +114,18 @@ function createWindowsUpdater({ root, installDir, check, supported = false, down
           if (actual !== hash) throw new Error('Installer checksum verification failed; nothing was installed.');
           // Run outside Program Files so MSI can replace the installed scripts and node.exe.
           const worker = path.join(job, 'Install-Update.ps1');
+          const launcher = path.join(job, 'Launch-Update.ps1');
           fs.copyFileSync(path.join(installDir, 'windows-update.ps1'), worker);
+          fs.copyFileSync(path.join(installDir, 'windows-launch-update.ps1'), launcher);
           writeStatus('prepared', 'Download verified. Starting backup and installation.', version);
           const child = launch(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), [
-            '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', worker,
+            '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', launcher, '-WorkerPath', worker,
             '-MsiPath', msi, '-ExpectedHash', hash, '-Version', version, '-DataRoot', root, '-InstallDir', installDir,
           ], { detached: true, stdio: 'ignore', windowsHide: true });
-          await new Promise((resolve, reject) => { child.once('error', reject); child.once('spawn', resolve); });
-          fs.writeFileSync(pendingFile, JSON.stringify({ pid: child.pid, version }), { mode: 0o600 });
+          await new Promise((resolve, reject) => {
+            child.once('error', reject);
+            child.once('exit', (code) => code === 0 ? resolve() : reject(new Error('The Windows update task could not start. Check Task Scheduler and update status.')));
+          });
           child.unref();
         } catch (err) {
           writeStatus('error', err.message, version);

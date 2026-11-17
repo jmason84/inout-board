@@ -413,6 +413,10 @@ ADMIN_PASSWORD=admin
 
   'Remove' {
     Write-Log 'Removing tasks, firewall rule and CA trust (data is kept)'
+    if (Get-ScheduledTask -TaskName 'IN-OUT Board Update' -ErrorAction SilentlyContinue) {
+      Stop-ScheduledTask -TaskName 'IN-OUT Board Update' -ErrorAction Stop
+      Unregister-ScheduledTask -TaskName 'IN-OUT Board Update' -Confirm:$false -ErrorAction Stop
+    }
     Stop-Board
     foreach ($t in @($TaskApp, $TaskTls, $TaskBackup)) {
       if (Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName $t -Confirm:$false -ErrorAction Stop }

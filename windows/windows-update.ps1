@@ -26,6 +26,7 @@ function Set-UpdateStatus([string]$State, [string]$Message) {
   Move-Item ($statusPath + '.tmp') $statusPath -Force
 }
 try {
+  [IO.File]::WriteAllText($pendingPath, (@{ pid=$PID; version=$Version } | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
   if ((Get-FileHash $MsiPath -Algorithm SHA256).Hash -ne $ExpectedHash) { throw 'Installer checksum verification failed.' }
   Set-UpdateStatus 'backing_up' 'Backing up the database and uploaded pictures before updating.'
   $global:LASTEXITCODE = 0
@@ -55,7 +56,10 @@ try {
   }
   if (-not $healthy) { throw 'The new version installed but HTTPS did not start. See logs\app.log.' }
   Set-UpdateStatus 'complete' 'Update installed. Reload the page to use the new version.'
-  Remove-Item $MsiPath -Force -ErrorAction SilentlyContinue
+  # Retain this verified installer for repair, but discard older update payloads.
+  $currentJob = Split-Path -Parent $MsiPath
+  Get-ChildItem $updates -Directory -Filter 'update-*' | Where-Object { $_.FullName -ne $currentJob } |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 } catch {
   $exitCode = 1
   Set-UpdateStatus 'error' $_.Exception.Message
@@ -63,5 +67,6 @@ try {
   try { & $boardScript -Action Start -DataRoot $DataRoot } catch { }
 } finally {
   Remove-Item $pendingPath -Force -ErrorAction SilentlyContinue
+  Unregister-ScheduledTask -TaskName 'IN-OUT Board Update' -Confirm:$false -ErrorAction SilentlyContinue
 }
 exit $exitCode
