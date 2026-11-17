@@ -19,13 +19,12 @@
         inout-board.env       settings (kept on upgrade and uninstall)
         data\                 inout.sqlite + uploads\   (kept)
         backups\              nightly backups            (kept)
-        logs\                 app.log, tls.log, install.log
-        caddy\                TLS front-end state and the local CA
-        Caddyfile             regenerated at every start from the live IPs
+        logs\                 app.log, install.log
+        tls\                  private CA + server certificate (re-issued when the IPs change)
 
-  The app listens only on 127.0.0.1 (private). Caddy terminates HTTPS on all
-  addresses of this PC and forwards to it, so the internal port is never
-  exposed.
+  The app serves HTTPS itself on every address of this PC (one port, default
+  8443). Its certificate is signed by a private CA created at first start; the
+  CA certificate is downloadable at https://<ip>:<port>/ca.crt.
 #>
 [CmdletBinding()]
 param(
@@ -33,7 +32,6 @@ param(
   [ValidateSet('Install', 'Remove', 'Stop', 'Start', 'Restart', 'RunApp', 'RunTls', 'Backup', 'Status', 'Addresses', 'ResetAdmin')]
   [string]$Action,
   [int]$TlsPort = 8443,
-  [int]$AppPort = 3000,
   [string]$ExtraAddresses = '',
   [string]$DataRoot = (Join-Path $env:ProgramData 'InOutBoard')
 )
@@ -41,13 +39,13 @@ param(
 $ErrorActionPreference = 'Stop'
 $InstallDir = Split-Path -Parent $PSCommandPath
 $Node       = Join-Path $InstallDir 'node.exe'
-$Caddy      = Join-Path $InstallDir 'caddy.exe'
+$Caddy      = Join-Path $InstallDir 'caddy.exe'   # only to clean up older installs
 $DataDir    = Join-Path $DataRoot 'data'
 $BackupDir  = Join-Path $DataRoot 'backups'
 $LogDir     = Join-Path $DataRoot 'logs'
-$CaddyDir   = Join-Path $DataRoot 'caddy'
+$TlsDir     = Join-Path $DataRoot 'tls'
+$LegacyCaDir = Join-Path $DataRoot 'caddy\caddy\pki\authorities\local'   # from versions that used Caddy
 $EnvFile    = Join-Path $DataRoot 'inout-board.env'
-$Caddyfile  = Join-Path $DataRoot 'Caddyfile'
 $CaCopy     = Join-Path $DataRoot 'InOutBoard-Local-CA.crt'
 
 $TaskApp    = 'IN-OUT Board'
@@ -92,6 +90,36 @@ function Read-EnvFile {
 function Get-Setting([hashtable]$Cfg, [string]$Name, $Default) {
   if ($Cfg.ContainsKey($Name) -and $Cfg[$Name] -ne '') { return $Cfg[$Name] }
   return $Default
+}
+
+function Set-EnvValue([string]$Name, [string]$Value) {
+  $lines = @(Get-Content $EnvFile | Where-Object { $_ -notmatch ('^\s*' + [regex]::Escape($Name) + '\s*=') })
+  $lines += ('{0}={1}' -f $Name, $Value)
+  Set-Content -Path $EnvFile -Value $lines -Encoding ASCII
+}
+
+function Remove-EnvKey([string]$Name) {
+  $lines = @(Get-Content $EnvFile | Where-Object { $_ -notmatch ('^\s*' + [regex]::Escape($Name) + '\s*=') })
+  Set-Content -Path $EnvFile -Value $lines -Encoding ASCII
+}
+
+# Settings from the Caddy-based versions (app on 127.0.0.1:3000 behind a proxy on TLS_PORT) are
+# converted once: the app now serves HTTPS itself on that same public port.
+function Convert-LegacyEnv {
+  $cfg = Read-EnvFile
+  if ((Get-Setting $cfg 'HTTPS' '') -ne '' -or (Get-Setting $cfg 'TLS_CERT' '') -ne '') { return }
+  Copy-Item $EnvFile ($EnvFile + '.before-https-builtin') -Force
+  $port = [int](Get-Setting $cfg 'TLS_PORT' $TlsPort)
+  Set-EnvValue 'HOST' '0.0.0.0'
+  Set-EnvValue 'PORT' ([string]$port)
+  Set-EnvValue 'HTTPS' 'auto'
+  Set-EnvValue 'TLS_DIR' $TlsDir
+  Set-EnvValue 'TLS_LEGACY_CA_DIR' $LegacyCaDir
+  $cert = Get-Setting $cfg 'TLS_CERT_FILE' ''
+  $key  = Get-Setting $cfg 'TLS_KEY_FILE' ''
+  if ($cert -and $key) { Set-EnvValue 'TLS_CERT' $cert; Set-EnvValue 'TLS_KEY' $key }
+  foreach ($k in @('TRUST_PROXY', 'COOKIE_SECURE', 'TLS_PORT', 'PUBLIC_SCHEME', 'PUBLIC_PORT', 'TLS_CERT_FILE', 'TLS_KEY_FILE')) { Remove-EnvKey $k }
+  Write-Log "Converted settings to built-in HTTPS on port $port (previous file kept as inout-board.env.before-https-builtin)"
 }
 
 function Protect-DataRoot {
@@ -158,18 +186,6 @@ function Register-BoardTask([string]$Name, [string]$ActionName, $Trigger, [strin
     -Description $Description -Force | Out-Null
 }
 
-function Wait-Healthy([int]$Port, [int]$Seconds = 40) {
-  $deadline = (Get-Date).AddSeconds($Seconds)
-  while ((Get-Date) -lt $deadline) {
-    try {
-      $r = Invoke-WebRequest -Uri ("http://127.0.0.1:{0}/api/health" -f $Port) -UseBasicParsing -TimeoutSec 3
-      if ($r.StatusCode -eq 200) { return $true }
-    } catch { }
-    Start-Sleep -Seconds 1
-  }
-  return $false
-}
-
 # HTTPS check that ignores certificate trust (we only want to know it answers).
 # curl.exe ships with Windows 10 1803 and later.
 function Test-Https([string]$Address, [int]$Port) {
@@ -206,73 +222,10 @@ function Get-Ipv4List {
   return @($info.addresses | Where-Object { $_.family -eq 'IPv4' } | ForEach-Object { [string]$_.address })
 }
 
-# A short string that changes when this PC's IPv4 addresses (or the extra
-# addresses in the settings file) change; the HTTPS front end restarts then.
-function Get-AddressSignature {
-  $cfg = Read-EnvFile
-  return ((Get-Ipv4List) -join ',') + '|' + (Get-Setting $cfg 'EXTRA_ADDRESSES' '')
-}
-
-function Write-Caddyfile {
-  $cfg = Read-EnvFile
-  $tls = [int](Get-Setting $cfg 'TLS_PORT' $TlsPort)
-  $app = [int](Get-Setting $cfg 'PORT' $AppPort)
-  $extra = Get-Setting $cfg 'EXTRA_ADDRESSES' ''
-  $certFile = Get-Setting $cfg 'TLS_CERT_FILE' ''
-  $keyFile  = Get-Setting $cfg 'TLS_KEY_FILE' ''
-
-  $hosts = New-Object System.Collections.Generic.List[string]
-  foreach ($h in @('localhost', '127.0.0.1')) { $hosts.Add($h) }
-  foreach ($ip in (Get-Ipv4List)) { $hosts.Add($ip) }
-  foreach ($e in ($extra -split '[,; ]+')) { if ($e) { $hosts.Add($e.Trim()) } }
-  $sites = ($hosts | Select-Object -Unique | ForEach-Object { 'https://{0}:{1}' -f $_, $tls }) -join ', '
-
-  if ($certFile -and $keyFile -and (Test-Path $certFile) -and (Test-Path $keyFile)) {
-    $tlsLine = 'tls "{0}" "{1}"' -f ($certFile -replace '\\', '/'), ($keyFile -replace '\\', '/')
-  } else {
-    $tlsLine = 'tls internal'
-  }
-  $caRoot = $DataRoot -replace '\\', '/'
-
-  # skip_install_trust: this script trusts the CA itself (machine-wide), so Caddy must not try.
-  # protocols h1 h2: no HTTP/3 (UDP) listener, so only the one TCP port needs to be open.
-  $text = @"
-# Generated by InOutBoard.ps1 at every start. Edit inout-board.env, not this file.
-{
-	admin off
-	auto_https disable_redirects
-	local_certs
-	skip_install_trust
-	servers {
-		protocols h1 h2
-	}
-}
-
-$sites {
-	$tlsLine
-	encode gzip
-
-	# Public certificate of the private CA, so other devices can download and trust it.
-	handle /ca.crt {
-		root * "$caRoot"
-		rewrite * /InOutBoard-Local-CA.crt
-		header Content-Type application/x-x509-ca-cert
-		header Content-Disposition "attachment; filename=InOutBoard-Local-CA.crt"
-		file_server
-	}
-
-	handle {
-		reverse_proxy 127.0.0.1:$app
-	}
-}
-"@
-  Set-Content -Path $Caddyfile -Value $text -Encoding ASCII
-}
-
 function Publish-LocalCa {
-  # Caddy creates its private CA the first time it serves an IP. Copy the public
+  # The app creates its private CA the first time it starts with HTTPS. Copy the public
   # certificate to a stable place so it can be handed to client devices.
-  $src = Join-Path $CaddyDir 'caddy\pki\authorities\local\root.crt'
+  $src = Join-Path $TlsDir 'ca.crt'
   for ($i = 0; $i -lt 30 -and -not (Test-Path $src); $i++) { Start-Sleep -Seconds 1 }
   if (Test-Path $src) { Copy-Item $src $CaCopy -Force; return $true }
   return $false
@@ -306,7 +259,7 @@ function Remove-CaTrust {
 
 function Show-Urls {
   $cfg = Read-EnvFile
-  $tls = [int](Get-Setting $cfg 'TLS_PORT' $TlsPort)
+  $tls = [int](Get-Setting $cfg 'PORT' $TlsPort)
   $info = Get-Addresses
   $port = ''
   if ($tls -ne 443) { $port = ':' + $tls }
@@ -333,7 +286,7 @@ function Show-Urls {
 switch ($Action) {
 
   'Install' {
-    foreach ($d in @($DataRoot, $DataDir, $BackupDir, $LogDir, $CaddyDir)) {
+    foreach ($d in @($DataRoot, $DataDir, $BackupDir, $LogDir, $TlsDir)) {
       if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
     }
     Write-Log "Installing from $InstallDir (data in $DataRoot)"
@@ -344,17 +297,14 @@ switch ($Action) {
 # IN/OUT Board settings. Lines starting with # are ignored.
 # After editing, apply with:  InOutBoard.ps1 -Action Restart   (or reboot).
 
-# The app listens only on this private address; HTTPS is added in front of it.
-HOST=127.0.0.1
-PORT=$AppPort
+# The board serves HTTPS itself on this port, on every address of this PC.
+# 443 gives https://<ip>/ ; otherwise https://<ip>:<port>/
+HOST=0.0.0.0
+PORT=$TlsPort
 DATA_DIR=$DataDir
-TRUST_PROXY=1
-COOKIE_SECURE=1
-
-# HTTPS port that people use (https://<ip>:<port>/). 443 gives https://<ip>/
-TLS_PORT=$TlsPort
-PUBLIC_SCHEME=https
-PUBLIC_PORT=$TlsPort
+HTTPS=auto
+TLS_DIR=$TlsDir
+TLS_LEGACY_CA_DIR=$LegacyCaDir
 
 # Extra addresses to serve HTTPS on, comma separated (for example the public
 # WAN address that the router forwards to this PC).
@@ -363,9 +313,10 @@ EXTRA_ADDRESSES=$ExtraAddresses
 # Which address is shown first in links. Leave empty to use the active route.
 PREFERRED_ADDRESS=
 
-# Optional: use your own certificate instead of the built-in private CA.
-# TLS_CERT_FILE=C:\ProgramData\InOutBoard\certs\board.crt
-# TLS_KEY_FILE=C:\ProgramData\InOutBoard\certs\board.key
+# Optional: use your own certificate instead of the built-in private CA
+# (remove HTTPS=auto above or leave it; these take priority). Re-read every 6 hours.
+# TLS_CERT=C:\ProgramData\InOutBoard\certs\board.crt
+# TLS_KEY=C:\ProgramData\InOutBoard\certs\board.key
 
 # First admin account. Used ONLY on the very first start.
 # Sign in as admin / admin; you are required to choose a new password immediately.
@@ -376,6 +327,7 @@ ADMIN_PASSWORD=admin
       Write-Log "Wrote default settings to $EnvFile"
     } else {
       Write-Log "Kept existing settings in $EnvFile"
+      Convert-LegacyEnv
       # A settings file from an older install can have ADMIN_PASSWORD blank, which would generate a
       # random password. If there is no database yet, no admin exists, so use the documented default.
       $existingCfg = Read-EnvFile
@@ -389,12 +341,14 @@ ADMIN_PASSWORD=admin
 
     Stop-Board
     $cfg = Read-EnvFile
-    $tls = [int](Get-Setting $cfg 'TLS_PORT' $TlsPort)
-    $app = [int](Get-Setting $cfg 'PORT' $AppPort)
+    $tls = [int](Get-Setting $cfg 'PORT' $TlsPort)
+
+    # Older versions ran a separate HTTPS front end (Caddy); it is no longer needed.
+    Unregister-ScheduledTask -TaskName $TaskTls -Confirm:$false -ErrorAction SilentlyContinue
+    Stop-ByPath $Caddy
 
     $boot = New-ScheduledTaskTrigger -AtStartup
-    Register-BoardTask $TaskApp 'RunApp' $boot 'IN/OUT Board application (private, 127.0.0.1)'
-    Register-BoardTask $TaskTls 'RunTls' $boot 'IN/OUT Board HTTPS front end'
+    Register-BoardTask $TaskApp 'RunApp' $boot 'IN/OUT Board (serves HTTPS)'
     $nightly = New-ScheduledTaskTrigger -Daily -At '02:15'
     Register-BoardTask $TaskBackup 'Backup' $nightly 'Nightly IN/OUT Board backup (keeps 14)'
 
@@ -404,29 +358,22 @@ ADMIN_PASSWORD=admin
     Get-NetFirewallRule -DisplayName $FirewallRule -ErrorAction SilentlyContinue | Remove-NetFirewallRule
     New-NetFirewallRule -DisplayName $FirewallRule -Direction Inbound -Action Allow -Protocol TCP `
       -LocalPort $tls -Profile Any -Enabled True | Out-Null
-    Write-Log "Firewall: allowed inbound TCP $tls on all network profiles (app port $app stays private)"
+    Write-Log "Firewall: allowed inbound TCP $tls on all network profiles"
 
     Start-ScheduledTask -TaskName $TaskApp
-    Start-ScheduledTask -TaskName $TaskTls
-
-    if (Wait-Healthy $app) {
-      Write-Log "App is healthy on 127.0.0.1:$app"
-    } else {
-      Write-Log "WARNING: app did not answer within 40 s. See $LogDir\app.log"
-    }
 
     if (Publish-LocalCa) {
       Write-Log "Local CA certificate: $CaCopy"
       if (Add-CaTrust) { Write-Log 'Local CA is now trusted on this PC (Trusted Root Certification Authorities).' }
     } else {
-      Write-Log "WARNING: local CA certificate not created yet; check $LogDir\tls.log"
+      Write-Log "WARNING: local CA certificate not created yet; check $LogDir\app.log"
     }
 
     # Prove HTTPS answers on every address of this PC, not just loopback.
     foreach ($ip in (@('127.0.0.1') + (Get-Ipv4List))) {
       $ok = Wait-Https $ip $tls 40
       if ($ok -eq $true) { Write-Log "HTTPS answers on ${ip}:$tls" }
-      elseif ($ok -eq $false) { Write-Log "WARNING: HTTPS did not answer on ${ip}:$tls. See $LogDir\tls.log" }
+      elseif ($ok -eq $false) { Write-Log "WARNING: HTTPS did not answer on ${ip}:$tls. See $LogDir\app.log" }
     }
     Show-Urls
   }
@@ -445,13 +392,11 @@ ADMIN_PASSWORD=admin
   'Stop'    { Stop-Board; Write-Log 'Stopped' }
   'Start'   {
     Start-ScheduledTask -TaskName $TaskApp
-    Start-ScheduledTask -TaskName $TaskTls
     Write-Log 'Started'
   }
   'Restart' {
     Stop-Board
     Start-ScheduledTask -TaskName $TaskApp
-    Start-ScheduledTask -TaskName $TaskTls
     Write-Log 'Restarted'
   }
 
@@ -469,31 +414,8 @@ ADMIN_PASSWORD=admin
   }
 
   'RunTls' {
-    $env:XDG_DATA_HOME   = $CaddyDir
-    $env:XDG_CONFIG_HOME = $CaddyDir
-    $log = Join-Path $LogDir 'tls.log'
-    while ($true) {
-      # Re-discover addresses on every start so a changed IP is picked up.
-      Write-Caddyfile
-      $signature = Get-AddressSignature
-      Write-Log "Starting HTTPS front end for: $signature" 'tls.log'
-      $p = Start-Logged $Caddy ('run --config "{0}" --adapter caddyfile' -f $Caddyfile) $log $InstallDir
-      # While it runs, watch for the PC's address changing (DHCP renewal, Wi-Fi/Ethernet switch,
-      # VPN). A new address needs a new certificate, so restart Caddy when that happens.
-      while (-not $p.HasExited) {
-        Start-Sleep -Seconds 30
-        if ($p.HasExited) { break }
-        $now = Get-AddressSignature
-        if ($now -ne $signature) {
-          Write-Log "Addresses changed ($signature -> $now); restarting HTTPS front end" 'tls.log'
-          Stop-ByPath $Caddy
-          break
-        }
-      }
-      $p.WaitForExit()
-      Write-Log 'HTTPS front end stopped; restarting in 5 s' 'tls.log'
-      Start-Sleep -Seconds 5
-    }
+    # Left over from versions that used a separate HTTPS front end. The app serves HTTPS itself now.
+    Write-Log 'RunTls is no longer used; the app serves HTTPS itself.' 'install.log'
   }
 
   'Backup' {
@@ -516,21 +438,19 @@ ADMIN_PASSWORD=admin
     $code = $LASTEXITCODE
     $out | ForEach-Object { Write-Log ([string]$_) }
     Start-ScheduledTask -TaskName $TaskApp
-    Start-ScheduledTask -TaskName $TaskTls
     if ($code -ne 0) { throw "Reset failed (exit $code)" }
   }
 
   'Status' {
     $cfg = Read-EnvFile
-    $app = [int](Get-Setting $cfg 'PORT' $AppPort)
-    $tls = [int](Get-Setting $cfg 'TLS_PORT' $TlsPort)
+    $tls = [int](Get-Setting $cfg 'PORT' $TlsPort)
     $admin = Test-Admin
 
     Write-Host 'IN/OUT Board status'
     Write-Host '-------------------'
 
     if ($admin) {
-      foreach ($t in @($TaskApp, $TaskTls, $TaskBackup)) {
+      foreach ($t in @($TaskApp, $TaskBackup)) {
         $task = Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue
         if ($task) { Write-Host ('{0,-26} {1}' -f $t, $task.State) } else { Write-Host ('{0,-26} NOT INSTALLED' -f $t) }
       }
@@ -540,16 +460,9 @@ ADMIN_PASSWORD=admin
     }
 
     # What is actually listening. This works without administrator rights.
-    $listen = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -in @($app, $tls) })
-    foreach ($port in @($app, $tls)) {
-      $rows = @($listen | Where-Object { $_.LocalPort -eq $port })
-      if ($rows.Count -eq 0) { Write-Host ('Port {0,-5} NOT LISTENING' -f $port) }
-      else { Write-Host ('Port {0,-5} listening on {1}' -f $port, ((($rows | ForEach-Object { $_.LocalAddress }) | Select-Object -Unique) -join ', ')) }
-    }
-    $appRows = @($listen | Where-Object { $_.LocalPort -eq $app -and $_.LocalAddress -notin @('127.0.0.1', '::1') })
-    if ($appRows.Count -gt 0) { Write-Host "  WARNING: the app port $app is reachable beyond this PC; it should be 127.0.0.1 only." }
-
-    if (Wait-Healthy $app 3) { Write-Host "App health      OK (127.0.0.1:$app)" } else { Write-Host "App health      NOT answering on 127.0.0.1:$app" }
+    $listen = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -eq $tls })
+    if ($listen.Count -eq 0) { Write-Host ('Port {0,-5} NOT LISTENING' -f $tls) }
+    else { Write-Host ('Port {0,-5} listening on {1}' -f $tls, ((($listen | ForEach-Object { $_.LocalAddress }) | Select-Object -Unique) -join ', ')) }
 
     # HTTPS on every address of this PC. Passing here proves the service works; it
     # does NOT prove the firewall lets other devices in (traffic to your own IP
