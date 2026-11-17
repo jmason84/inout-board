@@ -58,6 +58,7 @@
         <div class="admin-content">
           <!-- Overview -->
           <div class="admin-page active" id="admin-overview">
+            <div id="updateBanner" class="card update-banner" hidden role="status"></div>
             <div class="page-head"><h2>Overview</h2><button type="button" class="btn" id="refreshOverview">Refresh</button></div>
             <div class="stat-grid" id="overviewStats"></div>
             <div class="card">
@@ -183,6 +184,11 @@
             <div class="card">
               <h3>What the board shows</h3>
               <div class="opt-grid" id="modeOpts"></div>
+            </div>
+            <div class="card">
+              <h3>Theme</h3>
+              <p class="hint">Controls light or dark mode on the board. Each browser/tablet remembers its own choice. "Follow device" uses the operating system setting.</p>
+              <div class="opt-grid" id="themeOpts"></div>
             </div>
           </div>
         </div>

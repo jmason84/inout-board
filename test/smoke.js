@@ -201,6 +201,25 @@ async function t(name, fn) {
     for (const l of ['table', 'list', 'cards', 'tiles', 'board']) assert.equal((await call('PUT', '/api/admin/settings', { kiosk_layout: l })).status, 200, l);
   });
 
+  await t('settings: theme (light/dark/system) persists and appears in directory', async () => {
+    for (const v of ['light', 'dark', 'system']) {
+      assert.equal((await call('PUT', '/api/admin/settings', { theme: v })).status, 200, `set theme ${v}`);
+    }
+    assert.equal((await call('PUT', '/api/admin/settings', { theme: 'neon' })).status, 400, 'reject invalid theme');
+    await call('PUT', '/api/admin/settings', { theme: 'dark' });
+    const d = (await call('GET', '/api/directory', undefined, { jar: false })).data;
+    assert.equal(d.theme, 'dark', 'directory includes theme');
+    await call('PUT', '/api/admin/settings', { theme: 'system' }); // reset
+  });
+
+  await t('update-check endpoint returns JSON (may not reach GitHub)', async () => {
+    const r = await call('GET', '/api/admin/update-check');
+    assert.equal(r.status, 200);
+    assert.ok('current_version' in r.data || 'error' in r.data, 'response has version or error');
+    // unauthenticated should be rejected
+    assert.equal((await call('GET', '/api/admin/update-check', undefined, { jar: false })).status, 401);
+  });
+
   await t('static pages + security headers; path traversal blocked', async () => {
     for (const p of ['/', '/admin', '/me']) assert.equal((await call('GET', p, undefined, { jar: false })).status, 200, p);
     const r = await call('GET', '/', undefined, { jar: false });

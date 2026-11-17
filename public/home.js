@@ -70,6 +70,12 @@ async function load({ keepFocus = false } = {}) {
   mode = data.mode;
   tenants = data.tenants;
   if (!layoutLocked && VALID.includes(data.layout)) layout = data.layout; // admin's default, until the visitor picks one
+  // Apply admin's theme default for browsers that haven't made their own choice.
+  // IOPrefs stores '' for explicit 'system' and nothing for never-chosen.
+  // null from getItem means no choice yet — apply the admin's server default.
+  if (window.IOPrefs && data.theme) {
+    try { if (localStorage.getItem('inout_theme') === null) IOPrefs.setTheme(data.theme); } catch { /* ignore */ }
+  }
   loaded = true;
   const prevChips = $('#tenantChips').childElementCount;
   if (prevChips !== tenants.length + 1) paintChips();

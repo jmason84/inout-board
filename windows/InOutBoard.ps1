@@ -29,7 +29,7 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet('Install', 'Remove', 'Stop', 'Start', 'Restart', 'RunApp', 'RunTls', 'Backup', 'Status', 'Addresses', 'ResetAdmin')]
+  [ValidateSet('Install', 'Remove', 'Purge', 'Stop', 'Start', 'Restart', 'RunApp', 'RunTls', 'Backup', 'Status', 'Addresses', 'ResetAdmin')]
   [string]$Action,
   [int]$TlsPort = 8443,
   [string]$ExtraAddresses = '',
@@ -387,6 +387,20 @@ ADMIN_PASSWORD=admin
     Get-NetFirewallRule -DisplayName $FirewallRule -ErrorAction SilentlyContinue | Remove-NetFirewallRule
     try { Remove-CaTrust } catch { Write-Log "Could not remove CA trust: $($_.Exception.Message)" }
     Write-Log "Done. Your data remains in $DataRoot"
+  }
+
+  'Purge' {
+    # Full Remove first (stops services, removes tasks, firewall, CA trust)
+    & $PSCommandPath -Action Remove -TlsPort $TlsPort -DataRoot $DataRoot -ErrorAction SilentlyContinue
+    # Then delete all application data (database, TLS certs, backups, uploads, logs)
+    if (Test-Path $DataRoot) {
+      Write-Log "Removing all data in $DataRoot"
+      Remove-Item -Recurse -Force $DataRoot
+      Write-Log 'Data directory removed'
+    } else {
+      Write-Log "Data directory $DataRoot does not exist — nothing to purge"
+    }
+    Write-Log 'Purge complete. All IN/OUT Board data has been removed.'
   }
 
   'Stop'    { Stop-Board; Write-Log 'Stopped' }

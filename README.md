@@ -23,7 +23,7 @@ console with a time log. One Node.js process and one SQLite file; no database se
 - **One public board for the whole building.** Each company appears with its logo, office and contact details, then its people with a clear **IN / OUT** status and one big button. Search, In/Out filter, company chips.
 - **Privacy by choice.** Name, title, picture and status are always shown. Office, phone and email appear only when the person (or an admin) switches them on; phone and email are hidden by default. Search never matches phone numbers or emails.
 - **Photo, company logo or initials** next to each name, chosen by the person. **Tenant managers** keep their own company's logo and details up to date without being admins.
-- **Five layouts** — table, list, cards, tiles, and the classic in/out board — chosen by the visitor; the admin sets the default. Large-text and dark modes included.
+- **Five layouts** — table, list, cards, tiles, and the classic in/out board — chosen by the visitor; the admin sets the default. Large-text and dark modes included; the admin can set Light / Dark / System under settings and each browser remembers its own choice.
 - **People manage their own profile** at `/me`: picture, title, office, phone, email, what is shared, their recent shifts, password. A live preview shows how they will appear.
 - **Admin console:** overview, live board, tenants, people, time log (shifts and hours, CSV export, manual corrections), per-admin accounts, settings.
 - **CSV import and export of all people**, with a preview and plain-English problem list before anything is written.
@@ -198,7 +198,8 @@ Public endpoints are limited to the directory (showing only what people chose to
 | DELETE | `/api/people/:id` | Delete person | Admin |
 | GET | `/api/directory?q=&tenant_id=` | The public board: every tenant with its people, status and ONLY the contact details each person chose to show. Search matches names and tenant names, never phone numbers or emails. Returns the default layout and mode too | Public |
 | POST | `/api/clock` | Clock a person in/out (`person_id`, `direction`); `409` if already in that state | Public |
-| GET/PUT | `/api/admin/settings` | Read / change `kiosk_layout` (`table`/`list`/`cards`/`tiles`/`board`) and `kiosk_mode` (`browse`/`search`) | Admin |
+| GET/PUT | `/api/admin/settings` | Read / change `kiosk_layout` (`table`/`list`/`cards`/`tiles`/`board`), `kiosk_mode` (`browse`/`search`) and `theme` (`light`/`dark`/`system`) | Admin |
+| GET | `/api/admin/update-check` | Check GitHub for a newer release (cached 1 h). Returns `update_available`, versions and release URL | Admin |
 | POST | `/api/auth/login` | Sign in (`username`, `password`) → HttpOnly session cookie; throttled to 8 failures / 15 min / IP | Public |
 | POST | `/api/auth/logout` | End the session | Session |
 | GET | `/api/auth/me` | Current admin | Session |
@@ -327,7 +328,7 @@ What you get:
 
 - The board starts at boot and restarts itself if it stops. It serves HTTPS (default port **8443**) on every address of the PC, and only that one TCP port is opened in Windows Firewall.
 - Open `https://<this-PC-IP>:8443/` (admin at `/admin`). Addresses are re-discovered at every start and checked every minute, so a changed IP gets a matching certificate without a restart. Run `InOutBoard.ps1 -Action Status` (in `C:\Program Files\IN-OUT Board`) to list every URL.
-- Everything you would back up or edit is in `C:\ProgramData\InOutBoard\`: `inout-board.env` (settings), `data\` (database and photos), `backups\` (nightly at 02:15, keeps 14) and `logs\`. Upgrades and uninstalls never delete that folder.
+- Everything you would back up or edit is in `C:\ProgramData\InOutBoard\`: `inout-board.env` (settings), `data\` (database and photos), `backups\` (nightly at 02:15, keeps 14) and `logs\`. Upgrades and normal uninstalls keep that folder so your data survives. To remove everything including the database, run `InOutBoard.ps1 -Action Purge` from an elevated prompt, or pass `PURGEDATA=1` to the MSI uninstall (`msiexec /x {ProductCode} PURGEDATA=1`).
 - First sign-in: user `admin`, password `admin`. The board makes you choose a new password (10 or more characters) before anything else works, so do this straight after installing and before exposing the board beyond your office network.
 - Upgrade by running a newer MSI or EXE over the old one.
 
