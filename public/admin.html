@@ -31,6 +31,19 @@
         </div>
       </div>
 
+      <div class="admin-gate" id="pwGate" hidden>
+        <div class="card gate-card">
+          <h2>Choose a new password</h2>
+          <p class="muted">This account is still using its initial password. Choose a new one to continue. It must be at least 10 characters.</p>
+          <form id="pwForm">
+            <label class="field"><span>New password</span><input id="pwNew" type="password" class="search" autocomplete="new-password" minlength="10" required /></label>
+            <label class="field"><span>Repeat new password</span><input id="pwNew2" type="password" class="search" autocomplete="new-password" minlength="10" required /></label>
+            <div class="form-error" id="pwError" role="alert" hidden></div>
+            <button type="submit" class="btn primary block">Save password and continue</button>
+          </form>
+        </div>
+      </div>
+
       <div class="admin-shell" id="adminPanel" hidden>
         <nav class="sidebar" aria-label="Admin sections">
           <button type="button" class="side-link active" data-admin="overview" aria-current="page">Overview</button>

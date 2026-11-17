@@ -121,6 +121,7 @@ function addColumn(table, col, def) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all();
   if (!cols.some((c) => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
 }
+addColumn('admin_users', 'must_change', 'INTEGER NOT NULL DEFAULT 0');
 addColumn('people', 'email', "TEXT NOT NULL DEFAULT ''");
 addColumn('people', 'title', "TEXT NOT NULL DEFAULT ''");
 addColumn('people', 'bio', "TEXT NOT NULL DEFAULT ''");
@@ -254,9 +255,13 @@ function bootstrapAdmin() {
   let password = process.env.ADMIN_PASSWORD;
   let generated = false;
   if (!password) { password = crypto.randomBytes(12).toString('base64url'); generated = true; }
-  db.prepare('INSERT INTO admin_users (username, password_hash, created_at) VALUES (?, ?, ?)')
-    .run(username, hashPassword(password), Date.now());
+  // The well-known default ("admin") is accepted for the very first sign-in only:
+  // the account is flagged so nothing else works until a new password is chosen.
+  const mustChange = password === 'admin' || process.env.ADMIN_MUST_CHANGE === '1' ? 1 : 0;
+  db.prepare('INSERT INTO admin_users (username, password_hash, created_at, must_change) VALUES (?, ?, ?, ?)')
+    .run(username, hashPassword(password), Date.now(), mustChange);
   console.log(`Created first admin account "${username}".`);
+  if (mustChange) console.log('  Sign in with the initial password; you will be asked to choose a new one before anything else.');
   if (generated) console.log(`  Generated password (shown once, change it after login): ${password}`);
 }
 bootstrapAdmin();
@@ -291,7 +296,7 @@ function currentUser(req) {
   const sid = parseCookies(req).sid;
   if (!sid) return null;
   const row = db.prepare(`
-    SELECT u.id, u.username, s.expires_at
+    SELECT u.id, u.username, u.must_change, s.expires_at
     FROM sessions s JOIN admin_users u ON u.id = s.user_id
     WHERE s.token_hash = ?
   `).get(sha256(sid));
@@ -300,13 +305,17 @@ function currentUser(req) {
     db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(sha256(sid));
     return null;
   }
-  return { id: row.id, username: row.username };
+  return { id: row.id, username: row.username, must_change: !!row.must_change };
 }
 
 function requireAdmin(res, req) {
   const user = currentUser(req);
   if (!user) {
     sendJSON(res, 401, { error: 'Login required' });
+    return null;
+  }
+  if (user.must_change && String(req.url || '').split('?')[0] !== '/api/auth/password') {
+    sendJSON(res, 403, { error: 'You must choose a new password before continuing', must_change: true });
     return null;
   }
   req.user = user;
@@ -1040,7 +1049,7 @@ const server = http.createServer(async (req, res) => {
         .run(sha256(token), user.id, now, now + SESSION_TTL_MS);
       db.prepare('UPDATE admin_users SET last_login = ? WHERE id = ?').run(now, user.id);
       res.setHeader('Set-Cookie', sessionCookie(req, token, SESSION_TTL_MS / 1000));
-      return sendJSON(res, 200, { username: user.username });
+      return sendJSON(res, 200, { username: user.username, must_change: !!db.prepare('SELECT must_change FROM admin_users WHERE id = ?').get(user.id).must_change });
     }
 
     if (route === 'POST /api/auth/logout') {
@@ -1053,19 +1062,22 @@ const server = http.createServer(async (req, res) => {
     if (route === 'GET /api/auth/me') {
       const user = currentUser(req);
       if (!user) return sendJSON(res, 401, { error: 'Login required' });
-      return sendJSON(res, 200, { username: user.username });
+      return sendJSON(res, 200, { username: user.username, must_change: user.must_change });
     }
 
     if (route === 'POST /api/auth/password') {
       const user = requireAdmin(res, req); if (!user) return;
       const body = await readBody(req);
       const row = db.prepare('SELECT password_hash FROM admin_users WHERE id = ?').get(user.id);
-      if (!verifyPassword(String(body.current || ''), row.password_hash)) {
+      // In the forced first-login case the session was created seconds ago by presenting
+      // the current password, and nothing else is reachable, so it is not asked for again.
+      if (!user.must_change && !verifyPassword(String(body.current || ''), row.password_hash)) {
         return sendJSON(res, 400, { error: 'Current password is incorrect' });
       }
       const next = String(body.next || '');
       if (next.length < 10) return sendJSON(res, 400, { error: 'New password must be at least 10 characters' });
-      db.prepare('UPDATE admin_users SET password_hash = ? WHERE id = ?').run(hashPassword(next), user.id);
+      if (verifyPassword(next, row.password_hash)) return sendJSON(res, 400, { error: 'Choose a different password from the current one' });
+      db.prepare('UPDATE admin_users SET password_hash = ?, must_change = 0 WHERE id = ?').run(hashPassword(next), user.id);
       // Sign out every other session for this account.
       const sid = parseCookies(req).sid;
       db.prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?').run(user.id, sha256(sid));

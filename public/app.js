@@ -145,6 +145,7 @@ let boardTimer = null;
 function showLogin(msg) {
   setTimeout(() => { const u = $('#loginUser'); if (u && !$('#adminGate').hidden) u.focus(); }, 0);
   $('#adminGate').hidden = false;
+  $('#pwGate').hidden = true;
   $('#adminPanel').hidden = true;
   $('#acct').hidden = true;
   clearInterval(boardTimer);
@@ -152,21 +153,52 @@ function showLogin(msg) {
   err.hidden = !msg; err.textContent = msg || '';
 }
 
+// The account is still on its initial password: nothing else is allowed until it is changed.
+function showMustChange() {
+  clearInterval(boardTimer);
+  $('#adminGate').hidden = true;
+  $('#adminPanel').hidden = true;
+  $('#pwGate').hidden = false;
+  $('#acct').hidden = false;
+  setTimeout(() => { const f = $('#pwNew'); if (f) f.focus(); }, 0);
+}
+
 async function adminFetch(path, opts = {}) {
   const res = await api(path, opts);
   if (res.status === 401) { showLogin('Your session expired. Please sign in again.'); throw new Error('unauthorized'); }
+  if (res.status === 403) {
+    const body = await res.clone().json().catch(() => ({}));
+    if (body && body.must_change) { showMustChange(); throw new Error('must change password'); }
+  }
   return res;
 }
 
 async function loadAdmin() {
   const me = await api('/api/auth/me');
   if (!me.ok) return showLogin();
-  $('#acctName').textContent = (await json(me)).username;
+  const who = await json(me);
+  $('#acctName').textContent = who.username;
   $('#acct').hidden = false;
+  if (who.must_change) return showMustChange();
   $('#adminGate').hidden = true;
+  $('#pwGate').hidden = true;
   $('#adminPanel').hidden = false;
   showAdminPage(currentAdminPage);
 }
+
+$('#pwForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const err = $('#pwError');
+  const a = $('#pwNew').value, b = $('#pwNew2').value;
+  const fail = (m) => { err.textContent = m; err.hidden = false; };
+  if (a.length < 10) return fail('Use at least 10 characters.');
+  if (a !== b) return fail('The two passwords do not match.');
+  const res = await api('/api/auth/password', { method: 'POST', body: JSON.stringify({ next: a }) });
+  if (!res.ok) return fail((await json(res)).error || 'Could not change the password');
+  $('#pwNew').value = ''; $('#pwNew2').value = ''; err.hidden = true;
+  toast('Password changed');
+  loadAdmin();
+});
 
 $('#loginForm').addEventListener('submit', async (e) => {
   e.preventDefault();

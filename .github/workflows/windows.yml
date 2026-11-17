@@ -81,8 +81,26 @@ jobs:
             try { Invoke-WebRequest "http://${lan}:3000/api/health" -TimeoutSec 4 -UseBasicParsing | Out-Null; $open = $true } catch {}
             if ($open) { throw "internal port 3000 is reachable on $lan" }
           }
-          # the first-run password was logged exactly where the README says
-          if (-not (Select-String -Path "$root\logs\app.log" -Pattern 'Generated password' -Quiet)) { throw 'first-run password not in app.log' }
+          # HTTPS is TRUSTED on this PC (no certificate bypass): the installer added the CA to the machine store
+          $h = Invoke-RestMethod https://127.0.0.1:8443/api/health
+          if (-not $h.ok) { throw 'https health failed WITHOUT skipping certificate checks: CA not trusted' }
+          $h = Invoke-RestMethod https://localhost:8443/api/health
+          if (-not $h.ok) { throw 'https://localhost not trusted' }
+          $ca = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 "$root\InOutBoard-Local-CA.crt"
+          if (-not (Get-ChildItem Cert:\LocalMachine\Root | Where-Object Thumbprint -eq $ca.Thumbprint)) { throw 'CA not in LocalMachine Root store' }
+          # other devices can download the CA over HTTPS
+          $dl = Invoke-WebRequest https://127.0.0.1:8443/ca.crt -UseBasicParsing
+          if ($dl.Content -notmatch 'BEGIN CERTIFICATE') { throw '/ca.crt did not return a certificate' }
+          # and it is the public certificate only, never the key
+          if ($dl.Content -match 'PRIVATE KEY') { throw '/ca.crt leaked a private key' }
+          # firewall rule opens the TLS port by number on every profile
+          $rule = Get-NetFirewallRule -DisplayName 'IN/OUT Board HTTPS'
+          $pf = $rule | Get-NetFirewallPortFilter
+          if ($pf.LocalPort -ne '8443' -or $pf.Protocol -ne 'TCP' -or $rule.Profile -ne 'Any' -or $rule.Enabled -ne 'True') { throw "firewall rule wrong: $($rule.Profile) $($pf.LocalPort) $($rule.Enabled)" }
+          # first sign-in is admin/admin and forces a new password
+          $login = Invoke-RestMethod https://127.0.0.1:8443/api/auth/login -Method Post -ContentType 'application/json' -Body (@{ username='admin'; password='admin' } | ConvertTo-Json) -SessionVariable sess
+          if (-not $login.must_change) { throw 'admin/admin did not require a password change' }
+          try { Invoke-RestMethod https://127.0.0.1:8443/api/tenants -WebSession $sess | Out-Null; throw 'API reachable before password change' } catch { if ($_.Exception.Message -eq 'API reachable before password change') { throw } }
           & "$env:ProgramFiles\IN-OUT Board\InOutBoard.ps1" -Action Status
 
       - name: Backup now
@@ -120,6 +138,8 @@ jobs:
           if (Get-NetFirewallRule -DisplayName 'IN/OUT Board HTTPS' -ErrorAction SilentlyContinue) { throw 'firewall rule left behind' }
           if (Test-Path "$env:ProgramFiles\IN-OUT Board\server.js") { throw 'program files left behind' }
           if (-not (Test-Path "$env:ProgramData\InOutBoard\data\inout.sqlite")) { throw 'data was deleted' }
+          $ca = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 "$env:ProgramData\InOutBoard\InOutBoard-Local-CA.crt"
+          if (Get-ChildItem Cert:\LocalMachine\Root | Where-Object Thumbprint -eq $ca.Thumbprint) { throw 'CA still trusted after uninstall' }
 
       - name: Setup EXE installs silently
         shell: pwsh

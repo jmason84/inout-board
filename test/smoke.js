@@ -336,6 +336,59 @@ async function t(name, fn) {
     fs.rmSync(d2, { recursive: true, force: true });
   });
 
+  await t('default admin/admin works once, then a new password is forced before anything else', async () => {
+    const { spawn } = require('node:child_process');
+    const d3 = fs.mkdtempSync(path.join(os.tmpdir(), 'inout-default-'));
+    const port3 = PORT + 2000;
+    const srv = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', path.join(__dirname, '..', 'server.js')], {
+      env: { ...process.env, PORT: String(port3), HOST: '127.0.0.1', DATA_DIR: d3, ADMIN_USER: 'admin', ADMIN_PASSWORD: 'admin' },
+      stdio: 'ignore',
+    });
+    try {
+      const base = `http://127.0.0.1:${port3}`;
+      for (let i = 0; i < 60; i++) { try { if ((await fetch(base + '/api/health')).ok) break; } catch { /* starting */ } await sleep(100); }
+      let jar = '';
+      const api = async (method, url, body) => {
+        const r = await fetch(base + url, { method, headers: { 'Content-Type': 'application/json', ...(jar ? { Cookie: jar } : {}) }, body: body ? JSON.stringify(body) : undefined });
+        const set = r.headers.get('set-cookie'); if (set) jar = set.split(';')[0];
+        let data; try { data = await r.json(); } catch { data = {}; }
+        return { status: r.status, data };
+      };
+      const login = await api('POST', '/api/auth/login', { username: 'admin', password: 'admin' });
+      assert.equal(login.status, 200);
+      assert.equal(login.data.must_change, true);
+      assert.equal((await api('GET', '/api/auth/me')).data.must_change, true);
+      // everything except the password change is refused, and says why
+      for (const u of ['/api/tenants', '/api/people', '/api/admin/overview', '/api/admin/settings', '/api/admin/users']) {
+        const r = await api('GET', u);
+        assert.equal(r.status, 403, u); assert.equal(r.data.must_change, true, u);
+      }
+      assert.equal((await api('POST', '/api/auth/password', { next: 'short' })).status, 400);
+      assert.equal((await api('POST', '/api/auth/password', { next: 'admin' })).status, 400);
+      assert.equal((await api('POST', '/api/auth/password', { next: 'a-much-better-passphrase' })).status, 200);
+      assert.equal((await api('GET', '/api/auth/me')).data.must_change, false);
+      assert.equal((await api('GET', '/api/admin/overview')).status, 200);
+      // the old default no longer signs in; the new password does
+      jar = '';
+      assert.equal((await api('POST', '/api/auth/login', { username: 'admin', password: 'admin' })).status, 401);
+      const again = await api('POST', '/api/auth/login', { username: 'admin', password: 'a-much-better-passphrase' });
+      assert.equal(again.status, 200); assert.equal(again.data.must_change, false);
+    } finally {
+      srv.kill();
+      await sleep(200);
+      fs.rmSync(d3, { recursive: true, force: true });
+    }
+  });
+
+  await t('a strong ADMIN_PASSWORD is not forced to change', async () => {
+    // the main test server was started with a non-default password
+    const me = await call('POST', '/api/auth/login', { username: 'tester', password: PASS });
+    assert.equal(me.status, 200);
+    assert.equal(me.data.must_change, false);
+    cookie = me.set.split(';')[0];
+    assert.equal((await call('GET', '/api/admin/overview')).status, 200);
+  });
+
   console.log(`\n${passed} checks passed`);
 })().then(() => finish(0)).catch((e) => { console.error('\nServer log:\n' + log); finish(1); });
 

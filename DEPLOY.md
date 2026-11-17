@@ -116,7 +116,7 @@ What it sets up:
 - Two start-at-boot tasks run as SYSTEM and restart themselves if they stop: the app (listening **only** on `127.0.0.1:3000`) and Caddy (HTTPS on every address of the PC, default port **8443**).
 - Only the HTTPS port is opened in Windows Firewall. The internal port is never exposed.
 - A nightly backup at 02:15 that keeps 14.
-- Addresses are re-discovered at every start (no hard-coded IP), so a changed IP only needs a restart. The app logs every URL it can be reached on.
+- Addresses are re-discovered at every start (no hard-coded IP), so a changed IP is followed by HTTPS within about 30 seconds. The app logs every URL it can be reached on.
 
 ```powershell
 # silent install, HTTPS on 443, also serve the public WAN address
@@ -125,11 +125,23 @@ msiexec /i InOutBoard-1.0.0-x64.msi /qn TLSPORT=443 EXTRAADDRESSES=203.0.113.7
 powershell -ExecutionPolicy Bypass -File "C:\Program Files\IN-OUT Board\InOutBoard.ps1" -Action Status
 ```
 
-First admin password: printed once in `C:\ProgramData\InOutBoard\logs\app.log` unless you set `ADMIN_PASSWORD` in `inout-board.env` before the first start.
+First sign-in: user `admin`, password `admin`. The board makes you choose a new password (10 or more characters) before anything else works, so do this straight after installing and before exposing the board beyond your office network.
 
-**Certificates.** HTTPS on an IP address needs a certificate for that exact IP. The installer uses Caddy's private CA, so each client device must trust `C:\ProgramData\InOutBoard\InOutBoard-Local-CA.crt` or the browser warns. For a public WAN IP you can supply a publicly trusted certificate with `TLS_CERT_FILE` / `TLS_KEY_FILE` in `inout-board.env`. Automatic renewal of short-lived public IP certificates is **not** built in yet.
+**HTTPS and certificates.** HTTPS on a bare IP address needs a certificate for that exact IP, so the installer creates a private certificate authority on the PC. **This PC trusts it automatically** (a normal padlock in Chrome and Edge). **Other devices** download it from the board itself: open `https://<this-PC-IP>:8443/ca.crt` (the browser warns once, that is expected), then install it:
+
+Install it once on each device (without it the connection is still encrypted, but the browser warns):
+
+- **Windows:** double-click the file, *Install Certificate*, *Local Machine*, place it in *Trusted Root Certification Authorities*.
+- **macOS:** open the file, add it to *Keychain Access*, then set it to *Always Trust*.
+- **iPhone / iPad:** open the link in Safari and allow the download, install the profile in *Settings*, then turn it on under *Settings, General, About, Certificate Trust Settings*.
+- **Android:** *Settings, Security, Encryption & credentials, Install a certificate, CA certificate*.
+- **Firefox** keeps its own list: set `security.enterprise_roots.enabled` to `true` in `about:config` to use the Windows one.
+
+To use a publicly trusted certificate for a public IP instead, set `TLS_CERT_FILE` and `TLS_KEY_FILE` in `inout-board.env` and restart. Automatic renewal of short-lived public IP certificates is not built in yet.
 
 **Reaching it from the internet.** Reserve the PC's LAN address in DHCP, forward one public HTTPS port on the router to that port on the PC, and test from outside the office. Anyone who can open the board can still clock anyone in or out, so don't rely on internet exposure until per-person PINs exist.
+
+**Other devices cannot connect, but this PC can?** Run `InOutBoard.ps1 -Action Status` from an *elevated* PowerShell. It checks that the port is listening on all addresses, that the firewall rule exists on every network profile, and that HTTPS answers on each address. If those pass, the cause is outside the PC: router *AP / client isolation* or a guest network, a different subnet or VPN, or a third-party antivirus firewall. Test from the other device with `https://<this-PC-IP>:8443/api/health`; you should see `{"ok":true,...}` after the certificate warning. (Reaching the PC's own IP address from the PC never goes through the firewall, so it proves nothing about other devices.)
 
 Build it yourself: `powershell -File windows\build.ps1 -Version 1.0.0` on Windows with the WiX CLI (see the script header). The files are unsigned, so SmartScreen will warn until they are code-signed.
 

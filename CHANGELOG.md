@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased (codex/windows-fixes)
+- Windows: first sign-in is `admin` / `admin`; the account is flagged and the board refuses everything except choosing a new password (10+ characters) until it is changed. The same flag works anywhere via `ADMIN_MUST_CHANGE=1`.
+- Windows: the board's private CA is trusted on the PC automatically (machine-wide, removed again on uninstall) and downloadable by other devices at `/ca.crt`.
+- Windows: the firewall rule opens the HTTPS port by number on every network profile; HTTP/3 (UDP) is off so only one TCP port is needed; the HTTPS front end restarts itself when the PC's IP address changes; the installer confirms HTTPS answers on every address.
+- Windows: `InOutBoard.ps1 -Action Status` works without administrator rights and reports listeners, firewall, network profile and per-address HTTPS, instead of wrongly saying "not installed".
+
 ## Unreleased (codex/windows-wan-deployment)
 - Windows installer: MSI and Setup EXE (WiX) bundling Node.js and Caddy; start-at-boot tasks, HTTPS on any IP, firewall rule for the TLS port only, nightly backup, data kept in ProgramData across upgrades and uninstalls.
 - Address discovery at startup (`scripts/netinfo.js`) with an optional `PREFERRED_ADDRESS`; every reachable URL is logged.
