@@ -307,6 +307,35 @@ async function t(name, fn) {
     assert.ok(fs.readdirSync(path.join(out, dirs[0], 'uploads')).length >= 1, 'photos backed up');
   });
 
+  await t('address discovery lists real addresses and builds correct URLs', async () => {
+    const net = require('../scripts/netinfo');
+    const info = await net.discover();
+    assert.ok(Array.isArray(info.addresses));
+    for (const a of info.addresses) assert.ok(a.address && ['IPv4', 'IPv6'].includes(a.family));
+    // a manual preferred address only reorders, it never removes the others
+    const first = info.addresses[0];
+    if (first) assert.equal((await net.discover(first.address)).addresses.length, info.addresses.length);
+    assert.equal(net.urlFor('https', '172.20.20.15', 8443, '/admin'), 'https://172.20.20.15:8443/admin');
+    assert.equal(net.urlFor('https', '172.20.20.15', 443), 'https://172.20.20.15/');
+    assert.equal(net.urlFor('http', 'fd00::5', 3000), 'http://[fd00::5]:3000/');
+  });
+
+  await t('INOUT_ENV_FILE supplies settings but never overrides the real environment', async () => {
+    const { spawnSync } = require('node:child_process');
+    const d2 = fs.mkdtempSync(path.join(os.tmpdir(), 'inout-env-'));
+    const envFile = path.join(d2, 'inout-board.env');
+    fs.writeFileSync(envFile, ['# comment', `DATA_DIR=${d2}`, 'ADMIN_USER="fileadmin"', 'ADMIN_PASSWORD=from-file-pass', 'PORT=1'].join('\r\n'));
+    // PORT in the file would be unusable; the real env value must win. Stop right after startup.
+    const code = `process.on('exit',()=>{});require(${JSON.stringify(path.join(__dirname, '..', 'server.js'))});setTimeout(()=>process.exit(0),800)`;
+    const r = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', '-e', code], {
+      env: { ...process.env, INOUT_ENV_FILE: envFile, PORT: String(PORT + 1000), HOST: '127.0.0.1' }, encoding: 'utf8', timeout: 15000,
+    });
+    assert.match(r.stdout, /Created first admin account "fileadmin"/);
+    assert.match(r.stdout, new RegExp(`listening on http://127.0.0.1:${PORT + 1000}`));
+    assert.ok(fs.existsSync(path.join(d2, 'inout.sqlite')), 'DATA_DIR from file was used');
+    fs.rmSync(d2, { recursive: true, force: true });
+  });
+
   console.log(`\n${passed} checks passed`);
 })().then(() => finish(0)).catch((e) => { console.error('\nServer log:\n' + log); finish(1); });
 
