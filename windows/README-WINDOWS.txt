@@ -36,12 +36,12 @@ HTTPS and the certificate
       Firefox  about:config, security.enterprise_roots.enabled = true
   Without installing it the connection is still encrypted, but browsers warn.
   A publicly trusted certificate for a public IP can be used instead: set
-  TLS_CERT_FILE and TLS_KEY_FILE in the settings file.
+  TLS_CERT and TLS_KEY (file paths) in the settings file.
 
 Changing settings
   Edit inout-board.env, then run (as Administrator):
     powershell -ExecutionPolicy Bypass -File "C:\Program Files\IN-OUT Board\InOutBoard.ps1" -Action Restart
-  If the PC's IP address changes, HTTPS follows it within about 30 seconds.
+  If the PC's IP address changes, HTTPS follows it within about a minute.
 
 Silent install (IT)
   msiexec /i InOutBoard-<version>-x64.msi /qn TLSPORT=443 EXTRAADDRESSES=203.0.113.7

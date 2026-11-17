@@ -108,15 +108,15 @@ journalctl -u inout-board -f
 
 ## Option D: Windows installer (MSI and Setup EXE)
 
-Download `InOutBoard-<version>-x64.msi` (or `InOutBoard-Setup-<version>-x64.exe`, which wraps the same MSI) from the **Windows installer** workflow run in GitHub Actions (artifact) or from a release. Nothing else needs installing: Node.js and the HTTPS front end (Caddy) are inside the package.
+Download `InOutBoard-<version>-x64.msi` (or `InOutBoard-Setup-<version>-x64.exe`, which wraps the same MSI) from the **Windows installer** workflow run in GitHub Actions (artifact) or from a release. Nothing else needs installing: Node.js is inside the package and the board serves HTTPS itself.
 
 What it sets up:
 
 - Program in `C:\Program Files\IN-OUT Board\`. Settings, data, photos, backups and logs in `C:\ProgramData\InOutBoard\` (administrators and SYSTEM only). Upgrades and uninstalls never delete that folder.
-- Two start-at-boot tasks run as SYSTEM and restart themselves if they stop: the app (listening **only** on `127.0.0.1:3000`) and Caddy (HTTPS on every address of the PC, default port **8443**).
-- Only the HTTPS port is opened in Windows Firewall. The internal port is never exposed.
+- One start-at-boot task runs as SYSTEM and restarts itself if it stops: the board, serving HTTPS on every address of the PC (default port **8443**).
+- Only that one TCP port is opened in Windows Firewall.
 - A nightly backup at 02:15 that keeps 14.
-- Addresses are re-discovered at every start (no hard-coded IP), so a changed IP is followed by HTTPS within about 30 seconds. The app logs every URL it can be reached on.
+- Addresses are re-discovered at every start (no hard-coded IP), so a changed IP gets a matching certificate within about a minute, with no restart. The app logs every URL it can be reached on.
 
 ```powershell
 # silent install, HTTPS on 443, also serve the public WAN address
@@ -137,7 +137,7 @@ Install it once on each device (without it the connection is still encrypted, bu
 - **Android:** *Settings, Security, Encryption & credentials, Install a certificate, CA certificate*.
 - **Firefox** keeps its own list: set `security.enterprise_roots.enabled` to `true` in `about:config` to use the Windows one.
 
-To use a publicly trusted certificate for a public IP instead, set `TLS_CERT_FILE` and `TLS_KEY_FILE` in `inout-board.env` and restart. Automatic renewal of short-lived public IP certificates is not built in yet.
+To use a publicly trusted certificate for a public IP instead, set `TLS_CERT` and `TLS_KEY` (paths to the certificate and key files) in `inout-board.env` and restart. The files are re-read every 6 hours, so a renewed certificate is picked up without a restart. Automatic renewal of short-lived public IP certificates is not built in yet.
 
 **Reaching it from the internet.** Reserve the PC's LAN address in DHCP, forward one public HTTPS port on the router to that port on the PC, and test from outside the office. Anyone who can open the board can still clock anyone in or out, so don't rely on internet exposure until per-person PINs exist.
 
@@ -154,7 +154,7 @@ Sign-in uses a cookie. Two settings matter:
 | Setting | When | Effect |
 |---------|------|--------|
 | `COOKIE_SECURE=1` | The site is served over **https://** | Cookie is only sent over HTTPS |
-| `TRUST_PROXY=1` | A proxy or tunnel sits in front (Caddy, nginx, Cloudflare) | Uses the real visitor IP for login throttling |
+| `TRUST_PROXY=1` | A proxy or tunnel sits in front (Caddy, nginx, Cloudflare); not needed when the board serves HTTPS itself | Uses the real visitor IP for login throttling |
 
 **Gotcha:** with `COOKIE_SECURE=1`, sign-in will silently fail over plain `http://`. If you can't sign in after turning it on, check you are using the https address.
 

@@ -4,7 +4,7 @@
   file into $(StageDir) first, so this file never lists files by hand.
 
   Public properties (msiexec /i InOutBoard.msi TLSPORT=443 EXTRAADDRESSES=203.0.113.7 /qn):
-    TLSPORT         HTTPS port people use. Default 8443. Used on first install only;
+    TLSPORT         HTTPS port the board serves on. Default 8443. Used on first install only;
                     afterwards edit C:\ProgramData\InOutBoard\inout-board.env
     EXTRAADDRESSES  Extra addresses to serve HTTPS on (e.g. the public WAN address)
 
@@ -20,7 +20,7 @@
            Compressed="yes">
 
     <MajorUpgrade DowngradeErrorMessage="A newer version of IN/OUT Board is already installed." />
-    <MediaTemplate EmbedCab="yes" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
     <Property Id="TLSPORT" Value="8443" Secure="yes" />
     <Property Id="EXTRAADDRESSES" Secure="yes" />

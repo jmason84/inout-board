@@ -428,6 +428,85 @@ async function t(name, fn) {
     }
   });
 
+  await t('built-in HTTPS: private CA signs a certificate that covers the addresses, is reused, and re-issued when they change', async () => {
+    const crypto = require('node:crypto');
+    const tlscert = require('../scripts/tlscert');
+    const d5 = fs.mkdtempSync(path.join(os.tmpdir(), 'inout-tls-'));
+    try {
+      const a = tlscert.ensure({ dir: d5, ips: ['127.0.0.1', '192.168.6.235'], dns: ['localhost', 'front-desk'] });
+      assert.equal(a.reissued, true);
+      const ca = new crypto.X509Certificate(a.caPem);
+      const leaf = new crypto.X509Certificate(a.cert);
+      assert.ok(leaf.verify(ca.publicKey), 'server certificate is signed by the CA');
+      assert.equal(leaf.issuer, ca.subject);
+      assert.ok(leaf.checkIP('192.168.6.235') && leaf.checkIP('127.0.0.1'), 'IP SANs');
+      assert.ok(leaf.checkHost('localhost') && leaf.checkHost('front-desk'), 'DNS SANs');
+      assert.ok(!leaf.ca && ca.ca, 'leaf is not a CA, root is');
+      assert.ok(new Date(leaf.validTo) > new Date(Date.now() + 300 * 86400000), 'valid for most of a year');
+      assert.ok(!a.caPem.includes('PRIVATE'), 'CA certificate text carries no key');
+      const b = tlscert.ensure({ dir: d5, ips: ['127.0.0.1', '192.168.6.235'], dns: ['localhost', 'front-desk'] });
+      assert.equal(b.reissued, false, 'unchanged addresses reuse the certificate');
+      const c = tlscert.ensure({ dir: d5, ips: ['10.1.2.3'], dns: ['localhost'] });
+      assert.equal(c.reissued, true, 'new address re-issues');
+      assert.equal(c.caPem, a.caPem, 'same CA, so devices keep trusting it');
+      assert.ok(new crypto.X509Certificate(c.cert).checkIP('10.1.2.3'));
+    } finally { fs.rmSync(d5, { recursive: true, force: true }); }
+  });
+
+  await t('built-in HTTPS adopts the CA of an older Caddy-based install', async () => {
+    const crypto = require('node:crypto');
+    const tlscert = require('../scripts/tlscert');
+    const legacy = fs.mkdtempSync(path.join(os.tmpdir(), 'inout-legacy-'));
+    const d6 = fs.mkdtempSync(path.join(os.tmpdir(), 'inout-tls2-'));
+    try {
+      const old = tlscert.createCa('Caddy Local Authority - 2026 ECC Root');
+      fs.writeFileSync(path.join(legacy, 'root.crt'), old.certPem);
+      fs.writeFileSync(path.join(legacy, 'root.key'), old.keyPem);
+      const r = tlscert.ensure({ dir: d6, ips: ['127.0.0.1'], dns: ['localhost'], legacyDir: legacy });
+      assert.equal(r.caPem, old.certPem, 'same CA certificate');
+      assert.ok(new crypto.X509Certificate(r.cert).verify(new crypto.X509Certificate(old.certPem).publicKey));
+    } finally { fs.rmSync(legacy, { recursive: true, force: true }); fs.rmSync(d6, { recursive: true, force: true }); }
+  });
+
+  await t('HTTPS=auto serves the app over TLS, trusts only its CA, serves /ca.crt, gzips assets, sets Secure cookies', async () => {
+    const { spawn } = require('node:child_process');
+    const https = require('node:https');
+    const zlib = require('node:zlib');
+    const d7 = fs.mkdtempSync(path.join(os.tmpdir(), 'inout-https-'));
+    const p7 = PORT + 2000;
+    const srv = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', path.join(__dirname, '..', 'server.js')], {
+      env: { ...process.env, PORT: String(p7), HOST: '127.0.0.1', DATA_DIR: d7, HTTPS: 'auto', ADMIN_USER: 'tester', ADMIN_PASSWORD: PASS },
+      stdio: 'ignore',
+    });
+    const get = (urlPath, { ca, headers = {}, method = 'GET', body } = {}) => new Promise((resolve, reject) => {
+      const req = https.request({ host: '127.0.0.1', port: p7, path: urlPath, method, headers, ca, servername: 'localhost' }, (res) => {
+        const chunks = []; res.on('data', (c) => chunks.push(c)); res.on('end', () => resolve({ res, body: Buffer.concat(chunks) }));
+      });
+      req.on('error', reject); if (body) req.write(body); req.end();
+    });
+    try {
+      const caFile = path.join(d7, 'tls', 'ca.crt');
+      for (let i = 0; i < 60 && !fs.existsSync(path.join(d7, 'tls', 'server.crt')); i++) await sleep(100);
+      await sleep(300);
+      const ca = fs.readFileSync(caFile);
+      const h = await get('/api/health', { ca });
+      assert.equal(h.res.statusCode, 200);
+      await assert.rejects(get('/api/health', {}), /self.signed|unable to verify|certificate/i, 'untrusted without the CA');
+      const dl = await get('/ca.crt', { ca });
+      assert.equal(dl.res.headers['content-type'], 'application/x-x509-ca-cert');
+      assert.equal(dl.body.toString(), ca.toString());
+      assert.ok(!dl.body.toString().includes('PRIVATE'));
+      const js = await get('/app.js', { ca, headers: { 'Accept-Encoding': 'gzip' } });
+      assert.equal(js.res.headers['content-encoding'], 'gzip');
+      assert.equal(zlib.gunzipSync(js.body).toString(), fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8'));
+      const plain = await get('/app.js', { ca });
+      assert.equal(plain.res.headers['content-encoding'], undefined);
+      const login = await get('/api/auth/login', { ca, method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'tester', password: PASS }) });
+      assert.equal(login.res.statusCode, 200);
+      assert.match(String(login.res.headers['set-cookie']), /; Secure/);
+    } finally { srv.kill(); await sleep(200); fs.rmSync(d7, { recursive: true, force: true }); }
+  });
+
   console.log(`\n${passed} checks passed`);
 })().then(() => finish(0)).catch((e) => { console.error('\nServer log:\n' + log); finish(1); });
 

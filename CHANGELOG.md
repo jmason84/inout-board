@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased (codex/windows-slim)
+- Smaller and leaner Windows package: the board serves HTTPS itself (`HTTPS=auto`, `scripts/tlscert.js`, no dependencies), so Caddy is no longer bundled. One scheduled task and one port instead of two; certificates follow IP changes without a restart. Existing installs keep their CA (devices do not need to re-install it) and their port; settings are converted once and the old file is kept as `inout-board.env.before-https-builtin`.
+- Static assets are gzip-compressed; MSI uses high compression; no `.wixpdb` is published; MSI and EXE are separate artifacts; `NODE_VERSION` pins the bundled Node; CI prints installer and payload sizes.
+- `TLS_CERT` / `TLS_KEY` replace `TLS_CERT_FILE` / `TLS_KEY_FILE` (converted automatically).
+
 ## Unreleased (codex/windows-fixes)
 - `scripts/reset-admin.js` and `InOutBoard.ps1 -Action ResetAdmin` reset or create an admin (default `admin` / `admin`, forced change) without touching other admins. A settings file from an older install with a blank `ADMIN_PASSWORD` now follows the `admin` default when no database exists yet.
 - Windows: first sign-in is `admin` / `admin`; the account is flagged and the board refuses everything except choosing a new password (10+ characters) until it is changed. The same flag works anywhere via `ADMIN_MUST_CHANGE=1`.
