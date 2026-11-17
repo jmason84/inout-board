@@ -48,6 +48,11 @@
     <CustomAction Id="ConfigureBoard" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="check"
       ExeCommand="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]InOutBoard.ps1&quot; -Action Install -TlsPort [TLSPORT] -ExtraAddresses &quot;[EXTRAADDRESSES]&quot;" />
 
+    <!-- On a fresh install (not an upgrade), reset admin to admin/admin with forced password change.
+         This ensures that reinstalling over leftover data always gives a known first-login experience. -->
+    <CustomAction Id="ResetAdminOnInstall" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="ignore"
+      ExeCommand="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]InOutBoard.ps1&quot; -Action ResetAdmin" />
+
     <InstallExecuteSequence>
       <!-- Uninstall, and the removal of the old version during an upgrade: stop first so no file is locked. -->
       <Custom Action="StopBoard" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot;" />
@@ -57,6 +62,10 @@
       <Custom Action="PurgeBoard" After="RemoveBoard" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE AND PURGEDATA=&quot;1&quot;" />
       <!-- Install and upgrade: set up folders, settings, tasks, firewall, start. -->
       <Custom Action="ConfigureBoard" After="InstallFiles" Condition="NOT REMOVE" />
+      <!-- Fresh install only (not upgrade): reset admin to admin/admin so reinstalling over old data
+           always gives the documented first-login experience. Return="ignore" so a missing DB (truly
+           fresh) does not fail the install. -->
+      <Custom Action="ResetAdminOnInstall" After="ConfigureBoard" Condition="NOT REMOVE AND NOT WIX_UPGRADE_DETECTED" />
     </InstallExecuteSequence>
   </Package>
 </Wix>
