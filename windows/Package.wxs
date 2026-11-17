@@ -36,10 +36,10 @@
     </DirectoryRef>
 
     <!-- Quote-safe path to 64-bit Windows PowerShell. -->
-    <CustomAction Id="StopBoard" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="ignore"
+    <CustomAction Id="StopBoard" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="check"
       ExeCommand="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]InOutBoard.ps1&quot; -Action Stop" />
 
-    <CustomAction Id="RemoveBoard" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="ignore"
+    <CustomAction Id="RemoveBoard" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="check"
       ExeCommand="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]InOutBoard.ps1&quot; -Action Remove" />
 
     <CustomAction Id="PurgeBoard" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="check"

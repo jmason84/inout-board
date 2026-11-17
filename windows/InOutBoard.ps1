@@ -37,6 +37,15 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Windows cmdlets can otherwise emit non-terminating access-denied errors and
+# leave a misleading "Restarted" or "Removed" success message behind.
+if ($Action -in @('Install','Remove','Purge','Stop','Start','Restart','RunApp','Backup','ResetAdmin')) {
+  $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+  if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw 'Open PowerShell with Run as administrator before running this action. Nothing was changed.'
+  }
+}
 $InstallDir = Split-Path -Parent $PSCommandPath
 $Node       = Join-Path $InstallDir 'node.exe'
 $Caddy      = Join-Path $InstallDir 'caddy.exe'   # only to clean up older installs
@@ -158,7 +167,7 @@ function Invoke-Logged([string]$Exe, [string]$ArgString, [string]$LogPath, [stri
 function Stop-ByPath([string]$Exe) {
   Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
     Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -ieq $Exe) } |
-    ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch { } }
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 
 function Stop-OurProcesses {
@@ -167,11 +176,35 @@ function Stop-OurProcesses {
 }
 
 function Stop-Board {
+  # Every new supervisor checks this after its child exits, including a manually
+  # launched supervisor, so it cannot immediately reopen the port during stop.
+  if (Test-Path $DataRoot) { Set-Content (Join-Path $DataRoot 'supervisor.stop') 'stop' -Encoding ASCII }
   foreach ($t in @($TaskApp, $TaskTls, $TaskBackup)) {
-    try { Stop-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue } catch { }
+    if (Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue) { Stop-ScheduledTask -TaskName $t -ErrorAction Stop }
   }
+  # Clean up orphaned scheduled-task supervisor shells from earlier versions.
+  $scriptPattern = [regex]::Escape($PSCommandPath)
+  Get-CimInstance Win32_Process -ErrorAction Stop |
+    Where-Object { $_.ProcessId -ne $PID -and $_.Name -in @('powershell.exe','pwsh.exe') -and
+      $_.CommandLine -match $scriptPattern -and $_.CommandLine -match '-Action\s+(RunApp|RunTls)\b' } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
   Start-Sleep -Milliseconds 500
   Stop-OurProcesses
+  for ($attempt = 0; $attempt -lt 20; $attempt++) {
+    $remaining = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+      ($_.ExecutablePath -and ($_.ExecutablePath -ieq $Node -or $_.ExecutablePath -ieq $Caddy)) -or
+      ($_.ProcessId -ne $PID -and $_.Name -in @('powershell.exe','pwsh.exe') -and
+       $_.CommandLine -match $scriptPattern -and $_.CommandLine -match '-Action\s+(RunApp|RunTls)\b')
+    })
+    if ($remaining.Count -eq 0) { return }
+    Start-Sleep -Milliseconds 250
+  }
+  throw 'The board still has running processes. Stop/uninstall did not complete.'
+}
+
+function Start-Board {
+  Remove-Item (Join-Path $DataRoot 'supervisor.stop') -Force -ErrorAction SilentlyContinue
+  Start-ScheduledTask -TaskName $TaskApp -ErrorAction Stop
 }
 
 function Register-BoardTask([string]$Name, [string]$ActionName, $Trigger, [string]$Description) {
@@ -360,7 +393,7 @@ ADMIN_PASSWORD=admin
       -LocalPort $tls -Profile Any -Enabled True | Out-Null
     Write-Log "Firewall: allowed inbound TCP $tls on all network profiles"
 
-    Start-ScheduledTask -TaskName $TaskApp
+    Start-Board
 
     if (Publish-LocalCa) {
       Write-Log "Local CA certificate: $CaCopy"
@@ -382,7 +415,7 @@ ADMIN_PASSWORD=admin
     Write-Log 'Removing tasks, firewall rule and CA trust (data is kept)'
     Stop-Board
     foreach ($t in @($TaskApp, $TaskTls, $TaskBackup)) {
-      Unregister-ScheduledTask -TaskName $t -Confirm:$false -ErrorAction SilentlyContinue
+      if (Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName $t -Confirm:$false -ErrorAction Stop }
     }
     Get-NetFirewallRule -DisplayName $FirewallRule -ErrorAction SilentlyContinue | Remove-NetFirewallRule
     try { Remove-CaTrust } catch { Write-Log "Could not remove CA trust: $($_.Exception.Message)" }
@@ -406,26 +439,36 @@ ADMIN_PASSWORD=admin
 
   'Stop'    { Stop-Board; Write-Log 'Stopped' }
   'Start'   {
-    Start-ScheduledTask -TaskName $TaskApp
+    Start-Board
     Write-Log 'Started'
   }
   'Restart' {
     Stop-Board
-    Start-ScheduledTask -TaskName $TaskApp
+    Start-Board
     Write-Log 'Restarted'
   }
 
   'RunApp' {
     # Supervisor loop: if node ever exits, start it again after a short pause.
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $key = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($InstallDir.ToUpperInvariant()))).Replace('-','') }
+    finally { $sha.Dispose() }
+    $created = $false
+    $supervisorMutex = [Threading.Mutex]::new($true, ('Global\InOutBoard-' + $key), [ref]$created)
+    if (-not $created) { $supervisorMutex.Dispose(); throw 'Another IN/OUT Board supervisor is already running.' }
+    if (Test-Path (Join-Path $DataRoot 'supervisor.stop')) { $supervisorMutex.Dispose(); return }
     Stop-OurProcesses
     $env:INOUT_ENV_FILE = $EnvFile
+    $env:INOUT_WINDOWS_INSTALL = '1'
+    $env:INOUT_WINDOWS_DATA_ROOT = $DataRoot
     $log = Join-Path $LogDir 'app.log'
-    while ($true) {
+    try { while (-not (Test-Path (Join-Path $DataRoot 'supervisor.stop'))) {
       Write-Log 'Starting app' 'app.log'
       $code = Invoke-Logged $Node ('--disable-warning=ExperimentalWarning "{0}"' -f (Join-Path $InstallDir 'server.js')) $log $InstallDir
+      if (Test-Path (Join-Path $DataRoot 'supervisor.stop')) { break }
       Write-Log "App exited with code $code; restarting in 5 s" 'app.log'
       Start-Sleep -Seconds 5
-    }
+    } } finally { $supervisorMutex.ReleaseMutex(); $supervisorMutex.Dispose() }
   }
 
   'RunTls' {
@@ -434,7 +477,8 @@ ADMIN_PASSWORD=admin
   }
 
   'Backup' {
-    $env:DATA_DIR = $DataDir
+    $cfg = Read-EnvFile
+    $env:DATA_DIR = Get-Setting $cfg 'DATA_DIR' $DataDir
     $env:KEEP = '14'
     $code = Invoke-Logged $Node ('--disable-warning=ExperimentalWarning "{0}" "{1}"' -f (Join-Path $InstallDir 'scripts\backup.js'), $BackupDir) (Join-Path $LogDir 'backup.log') $InstallDir
     Write-Log "Backup finished with code $code (see $LogDir\backup.log)"
@@ -452,7 +496,7 @@ ADMIN_PASSWORD=admin
     $out = & $Node --disable-warning=ExperimentalWarning (Join-Path $InstallDir 'scripts\reset-admin.js') 2>&1
     $code = $LASTEXITCODE
     $out | ForEach-Object { Write-Log ([string]$_) }
-    Start-ScheduledTask -TaskName $TaskApp
+    Start-Board
     if ($code -ne 0) { throw "Reset failed (exit $code)" }
   }
 

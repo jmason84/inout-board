@@ -858,6 +858,7 @@ const THEMES = [
 ];
 
 async function loadSettings() {
+  loadSoftwareUpdate().catch(() => { $('#softwareUpdateStatus').textContent = 'Could not check GitHub. Try Check for updates again.'; });
   const st = await json(await adminFetch('/api/admin/settings'));
   const radio = (name, items, value) => items.map((o) => `
     <label class="opt">
@@ -888,5 +889,63 @@ $('#admin-settings').addEventListener('change', async (e) => {
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
+
+let updatePollTimer = null;
+let softwareUpdateInfo = null;
+function watchSoftwareUpdate() {
+  if (updatePollTimer) return;
+  updatePollTimer = setInterval(async () => {
+    try {
+      const status = await json(await adminFetch('/api/admin/update-status'));
+      $('#softwareUpdateStatus').textContent = status.message || status.state;
+      if (!status.busy) {
+        clearInterval(updatePollTimer); updatePollTimer = null;
+        $('#checkSoftwareUpdate').disabled = false;
+        await loadSoftwareUpdate();
+        if (status.state === 'complete') $('#softwareUpdateStatus').textContent = 'Update installed. Reload this page to use the new version.';
+      }
+    } catch {
+      $('#softwareUpdateStatus').textContent = 'The board is restarting. Waiting for it to come back online...';
+    }
+  }, 3000);
+}
+async function loadSoftwareUpdate(refresh = false) {
+  const info = await json(await adminFetch('/api/admin/update-check' + (refresh ? '?refresh=1' : '')));
+  softwareUpdateInfo = info;
+  const updater = info.updater || {};
+  $('#softwareVersion').textContent = 'Installed version: ' + (info.current_version || 'unknown') + (info.latest_version ? ' · Latest release: ' + info.latest_version : '');
+  $('#installSoftwareUpdate').disabled = !updater.supported || !info.update_available || !info.installable || updater.busy || !!info.error;
+  $('#checkSoftwareUpdate').disabled = !!updater.busy;
+  $('#softwareReleaseNotes').hidden = !info.release_url;
+  if (info.release_url) $('#softwareReleaseNotes').href = info.release_url;
+  $('#softwareUpdateStatus').textContent = updater.busy ? updater.message : updater.state === 'error' ? updater.message :
+    info.error ? 'Could not check GitHub: ' + info.error :
+    !updater.supported ? 'Automatic installation is available in the Windows installer edition. Use release notes for manual updates.' :
+    info.update_available && info.installable ? 'Version ' + info.latest_version + ' is ready to install.' :
+    info.update_available ? 'A new release exists, but its Windows installer is not published yet.' : 'You are up to date with published releases.';
+  if (updater.busy) watchSoftwareUpdate();
+}
+$('#checkSoftwareUpdate').addEventListener('click', async () => {
+  $('#checkSoftwareUpdate').disabled = true;
+  $('#softwareUpdateStatus').textContent = 'Checking GitHub...';
+  try { await loadSoftwareUpdate(true); }
+  catch { $('#softwareUpdateStatus').textContent = 'Could not check GitHub. Please try again.'; $('#checkSoftwareUpdate').disabled = false; }
+});
+$('#installSoftwareUpdate').addEventListener('click', async () => {
+  if (!softwareUpdateInfo || !confirm('Install version ' + softwareUpdateInfo.latest_version + '? A backup will be made first, and the board will be unavailable briefly.')) return;
+  $('#installSoftwareUpdate').disabled = true;
+  $('#checkSoftwareUpdate').disabled = true;
+  $('#softwareUpdateStatus').textContent = 'Preparing the update...';
+  try {
+    const response = await adminFetch('/api/admin/update', { method: 'POST' });
+    const result = await json(response);
+    if (!response.ok) throw new Error(result.error || 'Update could not start');
+    $('#softwareUpdateStatus').textContent = result.message;
+    watchSoftwareUpdate();
+  } catch (err) {
+    $('#softwareUpdateStatus').textContent = err.message;
+    $('#checkSoftwareUpdate').disabled = false;
+  }
+});
 
 loadAdmin();

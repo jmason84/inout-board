@@ -82,6 +82,7 @@ foreach ($d in @('public', 'scripts')) { Copy-Item (Join-Path $Root $d) (Join-Pa
 New-Item -ItemType Directory -Force -Path (Join-Path $Stage 'assets') | Out-Null
 Set-Content -Path (Join-Path $Stage 'assets\README.txt') -Value 'Reserved for static files.' -Encoding ASCII
 Copy-Item (Join-Path $Root 'windows\InOutBoard.ps1') $Stage
+Copy-Item (Join-Path $Root 'windows\windows-update.ps1') $Stage
 Copy-Item (Join-Path $Root 'windows\README-WINDOWS.txt') (Join-Path $Stage 'README-WINDOWS.txt')
 # never ship demo screenshots scripts or dev-only helpers that need Playwright
 Remove-Item (Join-Path $Stage 'scripts\screenshots.js'), (Join-Path $Stage 'scripts\build-pages.js') -ErrorAction SilentlyContinue

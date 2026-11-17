@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased (Windows Settings updater)
+- Admin Settings now shows installed/latest versions, Check for updates, and Update now for the installed Windows edition. The updater validates official release assets and checksums, backs up data/settings/TLS, installs a newer MSI in a detached worker, and reports progress/errors across restart.
+- Windows stop/uninstall verifies app and supervisor termination; duplicate supervisors are prevented. Mutating commands fail early without administrator rights, rather than printing misleading success messages.
+- Windows CI verifies checksum rejection, a real update through the worker, credential preservation, and port release after both MSI and EXE uninstall. Tagged releases use the tag version in the installer.
+
 ## Unreleased (codex/windows-features)
 - Fix Windows PowerShell 5.1 parsing of a UTF-8 em dash that prevented MSI installation; validate script decoding before building.
 - Preserve explicit System theme choices, apply changing admin defaults without pinning browsers, and keep the Pages demo compatible.

@@ -58,3 +58,14 @@ test('rate limits, malformed responses, and offline failures are cached briefly'
     f.advance(300001); await f.check(); assert.equal(f.calls(), 2);
   }
 });
+
+test('Windows updates require matching release assets and checksums', async () => {
+  const prefix = 'https://github.com/jmason84/inout-board/releases/download/v1.0.15/';
+  const assets = ['InOutBoard-1.0.15-x64.msi', 'SHA256SUMS.txt'].map((name) => ({ name, browser_download_url: prefix + name }));
+  const f = fixture(200, JSON.stringify({ tag_name: 'v1.0.15', assets }));
+  const result = await f.check();
+  assert.equal(result.installable, true);
+  assert.equal(result.installer_url, prefix + 'InOutBoard-1.0.15-x64.msi');
+  assets[0].browser_download_url = 'https://evil.test/update.msi';
+  assert.equal((await fixture(200, JSON.stringify({ tag_name: 'v1.0.15', assets })).check()).installable, false);
+});
