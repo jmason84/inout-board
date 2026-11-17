@@ -54,8 +54,9 @@
       ExeCommand="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]InOutBoard.ps1&quot; -Action ResetAdmin" />
 
     <InstallExecuteSequence>
-      <!-- Uninstall, and the removal of the old version during an upgrade: stop first so no file is locked. -->
-      <Custom Action="StopBoard" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot;" />
+      <!-- Stop on maintenance/repair as well as uninstall so node.exe is not locked
+           while InstallFiles replaces it. ConfigureBoard starts it again. -->
+      <Custom Action="StopBoard" Before="RemoveFiles" Condition="Installed OR REMOVE=&quot;ALL&quot;" />
       <!-- Real uninstall only (not an upgrade): drop the tasks and firewall rule. -->
       <Custom Action="RemoveBoard" After="StopBoard" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
       <!-- Optional: also wipe application data when PURGEDATA=1. -->
