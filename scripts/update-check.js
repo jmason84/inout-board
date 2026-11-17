@@ -16,10 +16,12 @@ function isNewer(current, latest) {
 }
 
 function createUpdateChecker({ version, request = https.request, now = Date.now }) {
-  let cached = null, expires = 0, pending = null;
-  return function checkForUpdate() {
+  let cached = null, expires = 0, pending = null, lastFetch = -Infinity;
+  return function checkForUpdate({ refresh = false } = {}) {
+    if (refresh && now() - lastFetch >= 30000) expires = 0;
     if (cached && now() < expires) return Promise.resolve(cached);
     if (pending) return pending;
+    lastFetch = now();
     pending = new Promise((resolve, reject) => {
       const req = request({
         hostname: 'api.github.com', path: '/repos/jmason84/inout-board/releases/latest',
@@ -40,10 +42,20 @@ function createUpdateChecker({ version, request = https.request, now = Date.now 
             const rel = JSON.parse(body);
             const releaseUrl = typeof rel.html_url === 'string' &&
               rel.html_url.startsWith('https://github.com/jmason84/inout-board/releases/') ? rel.html_url : '';
+            const latest = String(rel.tag_name || '').replace(/^v/, '');
+            const assetUrl = (name) => {
+              const a = (Array.isArray(rel.assets) ? rel.assets : []).find((a) => a.name === name);
+              const prefix = `https://github.com/jmason84/inout-board/releases/download/${rel.tag_name}/`;
+              return a && a.browser_download_url === prefix + name ? a.browser_download_url : '';
+            };
+            const installerUrl = assetUrl(`InOutBoard-${latest}-x64.msi`);
+            const checksumUrl = assetUrl('SHA256SUMS.txt');
             resolve({
               update_available: !rel.prerelease && !rel.draft && isNewer(version, rel.tag_name),
               current_version: version, latest_version: String(rel.tag_name || '').replace(/^v/, ''),
               release_name: rel.name || '', release_url: releaseUrl, published_at: rel.published_at || '',
+              installer_url: installerUrl, checksum_url: checksumUrl,
+              installable: Boolean(installerUrl && checksumUrl && /^\d+\.\d+\.\d+$/.test(latest)),
             });
           } catch (err) { reject(err); }
         });

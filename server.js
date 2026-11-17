@@ -875,6 +875,13 @@ function photosForTenant(tenantId) {
 
 const { createUpdateChecker } = require('./scripts/update-check');
 const checkForUpdate = createUpdateChecker({ version: PKG_VERSION });
+const { createWindowsUpdater } = require('./scripts/windows-update');
+const windowsUpdater = createWindowsUpdater({
+  root: process.env.INOUT_WINDOWS_DATA_ROOT || DATA_DIR,
+  installDir: __dirname,
+  check: checkForUpdate,
+  supported: process.platform === 'win32' && process.env.INOUT_WINDOWS_INSTALL === '1',
+});
 
 // ---------------------------------------------------------------------------
 // Settings (admin-controlled, whitelisted)
@@ -1342,8 +1349,20 @@ async function handleRequest(req, res) {
     // ---- Update check (admin-only, queries GitHub releases) ----------------
     if (route === 'GET /api/admin/update-check') {
       if (!requireAdmin(res, req)) return;
-      return checkForUpdate().then((info) => sendJSON(res, 200, info))
+      return checkForUpdate({ refresh: url.searchParams.get('refresh') === '1' }).then((info) => sendJSON(res, 200, { ...info, updater: windowsUpdater.status() }))
         .catch((e) => sendJSON(res, 200, { update_available: false, error: e.message }));
+    }
+    if (route === 'GET /api/admin/update-status') {
+      if (!requireAdmin(res, req)) return;
+      return sendJSON(res, 200, windowsUpdater.status());
+    }
+    if (route === 'POST /api/admin/update') {
+      if (!requireAdmin(res, req)) return;
+      try {
+        const { completion, ...status } = await windowsUpdater.start();
+        completion.catch((err) => console.error('Update preparation failed: ' + err.message));
+        return sendJSON(res, 202, status);
+      } catch (err) { return sendJSON(res, err.status || 502, { error: err.message }); }
     }
 
     // ---- Tenants -----------------------------------------------------------

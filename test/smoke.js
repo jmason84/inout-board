@@ -53,7 +53,7 @@ async function t(name, fn) {
   await t('health is public', async () => assert.equal((await call('GET', '/api/health')).data.ok, true));
 
   await t('private endpoints require login', async () => {
-    for (const p of ['/api/tenants', '/api/people', '/api/status', '/api/events', '/api/admin/overview', '/api/admin/users', '/api/admin/settings']) {
+    for (const p of ['/api/tenants', '/api/people', '/api/status', '/api/events', '/api/admin/overview', '/api/admin/users', '/api/admin/settings', '/api/admin/update-status']) {
       assert.equal((await call('GET', p, undefined, { jar: false })).status, 401, p);
     }
   });
@@ -219,6 +219,9 @@ async function t(name, fn) {
     assert.ok('current_version' in r.data || 'error' in r.data, 'response has version or error');
     // unauthenticated should be rejected
     assert.equal((await call('GET', '/api/admin/update-check', undefined, { jar: false })).status, 401);
+    assert.equal((await call('POST', '/api/admin/update', {}, { jar: false })).status, 401);
+    assert.equal((await call('POST', '/api/admin/update', {})).status, 400, 'manual Node launches cannot install software');
+    assert.equal((await call('GET', '/api/admin/update-status')).data.supported, false);
   });
 
   await t('static pages + security headers; path traversal blocked', async () => {

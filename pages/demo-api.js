@@ -216,6 +216,8 @@
   // ---- admin: settings / overview / status
   R('GET', /^\/admin\/settings$/, () => needAdmin() || J({ theme: 'system', ...S.settings }));
   R('GET', /^\/admin\/update-check$/, () => needAdmin() || J({ update_available: false, current_version: 'demo' }));
+  R('GET', /^\/admin\/update-status$/, () => needAdmin() || J({ state: 'idle', supported: false, busy: false }));
+  R('POST', /^\/admin\/update$/, () => needAdmin() || ERR(400, 'Updates are not installed in the demo.'));
   R('PUT', /^\/admin\/settings$/, (m, q, b) => {
     const bad = needAdmin(); if (bad) return bad;
     const opts = { kiosk_layout: ['table', 'list', 'cards', 'tiles', 'board'], kiosk_mode: ['search', 'browse'], theme: ['light', 'dark', 'system'] };
