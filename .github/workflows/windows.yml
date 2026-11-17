@@ -131,14 +131,20 @@ jobs:
           if (-not $h.ok) { throw 'board not healthy after EXE install' }
           & $exe /uninstall /quiet /norestart | Out-Null
 
+      - name: Collect installer logs
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force installer-logs | Out-Null
+          Copy-Item "$env:RUNNER_TEMP\*.log" installer-logs -ErrorAction SilentlyContinue
+          Copy-Item "$env:ProgramData\InOutBoard\logs\*.log" installer-logs -ErrorAction SilentlyContinue
+
       - name: Keep installer logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: installer-logs
-          path: |
-            ${{ runner.temp }}/*.log
-            C:/ProgramData/InOutBoard/logs/*.log
+          path: installer-logs
           if-no-files-found: ignore
 
       - name: Upload installers
