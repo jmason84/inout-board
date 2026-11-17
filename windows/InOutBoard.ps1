@@ -11,6 +11,7 @@
     .\InOutBoard.ps1 -Action Addresses    # URLs for every address on this PC
     .\InOutBoard.ps1 -Action Backup       # one backup now
     .\InOutBoard.ps1 -Action Restart      # after editing inout-board.env
+    .\InOutBoard.ps1 -Action ResetAdmin   # admin / admin again (asks for a new password at sign-in)
 
   Layout
     <install dir>\            program files (replaced on upgrade)
@@ -29,7 +30,7 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet('Install', 'Remove', 'Stop', 'Start', 'Restart', 'RunApp', 'RunTls', 'Backup', 'Status', 'Addresses')]
+  [ValidateSet('Install', 'Remove', 'Stop', 'Start', 'Restart', 'RunApp', 'RunTls', 'Backup', 'Status', 'Addresses', 'ResetAdmin')]
   [string]$Action,
   [int]$TlsPort = 8443,
   [int]$AppPort = 3000,
@@ -375,6 +376,15 @@ ADMIN_PASSWORD=admin
       Write-Log "Wrote default settings to $EnvFile"
     } else {
       Write-Log "Kept existing settings in $EnvFile"
+      # A settings file from an older install can have ADMIN_PASSWORD blank, which would generate a
+      # random password. If there is no database yet, no admin exists, so use the documented default.
+      $existingCfg = Read-EnvFile
+      if ((-not (Test-Path (Join-Path $DataDir 'inout.sqlite'))) -and ((Get-Setting $existingCfg 'ADMIN_PASSWORD' '') -eq '')) {
+        $lines = @(Get-Content $EnvFile | Where-Object { $_ -notmatch '^\s*ADMIN_PASSWORD\s*=' })
+        $lines += 'ADMIN_PASSWORD=admin'
+        Set-Content -Path $EnvFile -Value $lines -Encoding ASCII
+        Write-Log 'No database yet: set ADMIN_PASSWORD=admin in the settings file (you will be asked to change it at first sign-in).'
+      }
     }
 
     Stop-Board
@@ -495,6 +505,20 @@ ADMIN_PASSWORD=admin
   }
 
   'Addresses' { Show-Urls }
+
+  'ResetAdmin' {
+    # Stops the app, resets the admin account to admin / admin (forced change at next sign-in), starts it again.
+    $cfg = Read-EnvFile
+    $dd = Get-Setting $cfg 'DATA_DIR' $DataDir
+    Stop-Board
+    $env:DATA_DIR = $dd
+    $out = & $Node --disable-warning=ExperimentalWarning (Join-Path $InstallDir 'scripts\reset-admin.js') 2>&1
+    $code = $LASTEXITCODE
+    $out | ForEach-Object { Write-Log ([string]$_) }
+    Start-ScheduledTask -TaskName $TaskApp
+    Start-ScheduledTask -TaskName $TaskTls
+    if ($code -ne 0) { throw "Reset failed (exit $code)" }
+  }
 
   'Status' {
     $cfg = Read-EnvFile

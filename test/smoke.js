@@ -389,6 +389,45 @@ async function t(name, fn) {
     assert.equal((await call('GET', '/api/admin/overview')).status, 200);
   });
 
+  await t('reset-admin recovers a locked-out install (admin/admin, forced change) and can set a chosen password', async () => {
+    const { spawn, execFileSync } = require('node:child_process');
+    const d4 = fs.mkdtempSync(path.join(os.tmpdir(), 'inout-reset-'));
+    const port4 = PORT + 3000;
+    const start = () => spawn(process.execPath, ['--disable-warning=ExperimentalWarning', path.join(__dirname, '..', 'server.js')], {
+      env: { ...process.env, PORT: String(port4), HOST: '127.0.0.1', DATA_DIR: d4, ADMIN_USER: 'owner', ADMIN_PASSWORD: 'unknown-long-original-pass' },
+      stdio: 'ignore',
+    });
+    const base = `http://127.0.0.1:${port4}`;
+    const up = async () => { for (let i = 0; i < 60; i++) { try { if ((await fetch(base + '/api/health')).ok) return; } catch { /* starting */ } await sleep(100); } };
+    const login = async (u, p) => {
+      const r = await fetch(base + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: u, password: p }) });
+      let data = {}; try { data = await r.json(); } catch { /* none */ }
+      return { status: r.status, data };
+    };
+    const reset = (...args) => execFileSync(process.execPath, ['--disable-warning=ExperimentalWarning', path.join(__dirname, '..', 'scripts', 'reset-admin.js'), ...args], { env: { ...process.env, DATA_DIR: d4 }, encoding: 'utf8' });
+    let srv = start();
+    try {
+      await up();
+      assert.equal((await login('admin', 'admin')).status, 401, 'no admin/admin yet');
+      srv.kill(); await sleep(300);
+      assert.match(reset(), /Created admin "admin"/);
+      srv = start(); await up();
+      const a = await login('admin', 'admin');
+      assert.equal(a.status, 200); assert.equal(a.data.must_change, true);
+      assert.equal((await login('owner', 'unknown-long-original-pass')).status, 200, 'other admins are untouched');
+      srv.kill(); await sleep(300);
+      assert.match(reset('owner', 'a-brand-new-passphrase'), /Reset the password for admin "owner"/);
+      assert.throws(() => reset('owner', 'short'), /at least 10/);
+      srv = start(); await up();
+      assert.equal((await login('owner', 'unknown-long-original-pass')).status, 401);
+      const o = await login('owner', 'a-brand-new-passphrase');
+      assert.equal(o.status, 200); assert.equal(o.data.must_change, false);
+    } finally {
+      srv.kill(); await sleep(200);
+      fs.rmSync(d4, { recursive: true, force: true });
+    }
+  });
+
   console.log(`\n${passed} checks passed`);
 })().then(() => finish(0)).catch((e) => { console.error('\nServer log:\n' + log); finish(1); });
 

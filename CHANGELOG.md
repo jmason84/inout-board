@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased (codex/windows-fixes)
+- `scripts/reset-admin.js` and `InOutBoard.ps1 -Action ResetAdmin` reset or create an admin (default `admin` / `admin`, forced change) without touching other admins. A settings file from an older install with a blank `ADMIN_PASSWORD` now follows the `admin` default when no database exists yet.
 - Windows: first sign-in is `admin` / `admin`; the account is flagged and the board refuses everything except choosing a new password (10+ characters) until it is changed. The same flag works anywhere via `ADMIN_MUST_CHANGE=1`.
 - Windows: the board's private CA is trusted on the PC automatically (machine-wide, removed again on uninstall) and downloadable by other devices at `/ca.crt`.
 - Windows: the firewall rule opens the HTTPS port by number on every network profile; HTTP/3 (UDP) is off so only one TCP port is needed; the HTTPS front end restarts itself when the PC's IP address changes; the installer confirms HTTPS answers on every address.

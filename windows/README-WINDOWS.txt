@@ -9,6 +9,10 @@ First sign-in
   User "admin", password "admin". The board makes you choose a new password
   (10 or more characters) before anything else works. Do this straight after
   installing and before exposing the board beyond your office network.
+  This applies to a brand-new data folder only. If this PC already had the board,
+  its existing admin account and password are kept. Reset them any time with:
+    powershell -ExecutionPolicy Bypass -File "C:\Program Files\IN-OUT Board\InOutBoard.ps1" -Action ResetAdmin
+  (run as Administrator; it signs in as admin / admin and asks for a new password).
 
 Where things are
   Program         C:\Program Files\IN-OUT Board\

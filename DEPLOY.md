@@ -214,7 +214,7 @@ docker compose start app
 - `GET /api/health` returns `{"ok":true}`. Docker uses it for its healthcheck.
 - **"Cross-origin request blocked" when signing in:** you are behind a proxy/tunnel on an old version. Update to the latest code (it uses the browser's `Sec-Fetch-Site` header). If an unusual proxy still strips it, set `TRUST_PROXY=1` and/or `ALLOWED_ORIGINS=https://your.public.address`.
 - **Can't sign in:** wrong address scheme with `COOKIE_SECURE=1` (see above), or you were throttled (8 failed tries in 15 minutes per address; wait or restart the app).
-- **Lost the admin password and have no other admin:** stop the app, run the SQLite statement `DELETE FROM admin_users;` against `inout.sqlite` (the sqlite3 CLI, or any SQLite tool), then start with a new `ADMIN_PASSWORD`. A fresh admin is created on start.
+- **Lost the admin password (or `admin` / `admin` does not work):** `admin` / `admin` only applies to a brand-new data folder. An existing install keeps its existing admin account and the password that was generated for it. Reset it with `node scripts/reset-admin.js` (creates or resets `admin` / `admin`, and you are asked for a new password at sign-in; other admins are untouched), `docker compose exec app node scripts/reset-admin.js`, or on Windows `InOutBoard.ps1 -Action ResetAdmin` from an elevated PowerShell. To set a specific password instead: `node scripts/reset-admin.js jordan 'a-long-passphrase'`.
 - **Photos don't show after a restore:** the `uploads/` folder wasn't restored alongside the database.
 - **Port already in use:** change `HOST_PORT` (Docker) or `PORT` (plain Node).
 
