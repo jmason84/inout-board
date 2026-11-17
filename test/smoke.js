@@ -9,6 +9,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const assert = require('node:assert/strict');
+const http = require('node:http');
 
 const PORT = 3900 + Math.floor(Math.random() * 90);
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -201,11 +202,41 @@ async function t(name, fn) {
     for (const l of ['table', 'list', 'cards', 'tiles', 'board']) assert.equal((await call('PUT', '/api/admin/settings', { kiosk_layout: l })).status, 200, l);
   });
 
+  await t('settings: theme (light/dark/system) persists and appears in directory', async () => {
+    for (const v of ['light', 'dark', 'system']) {
+      assert.equal((await call('PUT', '/api/admin/settings', { theme: v })).status, 200, `set theme ${v}`);
+    }
+    assert.equal((await call('PUT', '/api/admin/settings', { theme: 'neon' })).status, 400, 'reject invalid theme');
+    await call('PUT', '/api/admin/settings', { theme: 'dark' });
+    const d = (await call('GET', '/api/directory', undefined, { jar: false })).data;
+    assert.equal(d.theme, 'dark', 'directory includes theme');
+    await call('PUT', '/api/admin/settings', { theme: 'system' }); // reset
+  });
+
+  await t('update-check endpoint returns JSON (may not reach GitHub)', async () => {
+    const r = await call('GET', '/api/admin/update-check');
+    assert.equal(r.status, 200);
+    assert.ok('current_version' in r.data || 'error' in r.data, 'response has version or error');
+    // unauthenticated should be rejected
+    assert.equal((await call('GET', '/api/admin/update-check', undefined, { jar: false })).status, 401);
+  });
+
   await t('static pages + security headers; path traversal blocked', async () => {
     for (const p of ['/', '/admin', '/me']) assert.equal((await call('GET', p, undefined, { jar: false })).status, 200, p);
     const r = await call('GET', '/', undefined, { jar: false });
     assert.match(r.headers.get('content-security-policy'), /default-src 'self'/);
     assert.notEqual((await call('GET', '/photos/../data/inout.sqlite', undefined, { jar: false })).status, 200);
+  });
+
+  await t('malformed Host is rejected without crashing the server', async () => {
+    const status = await new Promise((resolve, reject) => {
+      const req = http.get(BASE + '/api/health', { headers: { Host: '[' } }, (res) => {
+        res.resume(); res.on('end', () => resolve(res.statusCode));
+      });
+      req.on('error', reject);
+    });
+    assert.equal(status, 400);
+    assert.equal((await call('GET', '/api/health')).data.ok, true);
   });
 
   await t('CSV export: admin only, UTF-8 BOM, every person with their settings', async () => {

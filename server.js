@@ -40,6 +40,7 @@ if (process.env.INOUT_ENV_FILE) {
 const netinfo = require('./scripts/netinfo');
 const tlscert = require('./scripts/tlscert');
 
+const PKG_VERSION = require('./package.json').version;
 const PORT = Number(process.env.PORT || 3000);
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const TRUST_PROXY = process.env.TRUST_PROXY === '1';
@@ -869,13 +870,21 @@ function photosForTenant(tenantId) {
 }
 
 // ---------------------------------------------------------------------------
+// GitHub update check (cached, rate-limit safe)
+// ---------------------------------------------------------------------------
+
+const { createUpdateChecker } = require('./scripts/update-check');
+const checkForUpdate = createUpdateChecker({ version: PKG_VERSION });
+
+// ---------------------------------------------------------------------------
 // Settings (admin-controlled, whitelisted)
 // ---------------------------------------------------------------------------
 
-const SETTING_DEFAULTS = { kiosk_layout: 'table', kiosk_mode: 'browse' };
+const SETTING_DEFAULTS = { kiosk_layout: 'table', kiosk_mode: 'browse', theme: 'system' };
 const SETTING_OPTIONS = {
   kiosk_layout: ['table', 'list', 'cards', 'tiles', 'board'],
   kiosk_mode: ['search', 'browse'],
+  theme: ['light', 'dark', 'system'],
 };
 
 function getSettings() {
@@ -1045,7 +1054,9 @@ function importPeople(csvText, { dryRun, defaultTenantId }) {
 // ---------------------------------------------------------------------------
 
 async function handleRequest(req, res) {
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  let url;
+  try { url = new URL(req.url, `http://${req.headers.host || 'localhost'}`); }
+  catch { return sendJSON(res, 400, { error: 'Invalid request URL or Host' }); }
   // Normalise /api/<resource>/<numeric id> to /api/<resource>/:id for routing.
   const idMatch = url.pathname.match(/^\/api\/(tenants|people|events|admin\/users)\/(\d+)$/);
   const subMatch = url.pathname.match(/^\/api\/(people|tenants)\/(\d+)\/(photo|access|logo)$/);
@@ -1305,7 +1316,7 @@ async function handleRequest(req, res) {
       const st = getSettings();
       const q = (url.searchParams.get('q') || '').trim().slice(0, 60);
       const tenantId = Number(url.searchParams.get('tenant_id')) || null;
-      const base = { layout: st.kiosk_layout, mode: st.kiosk_mode };
+      const base = { layout: st.kiosk_layout, mode: st.kiosk_mode, theme: st.theme };
       if (!q && st.kiosk_mode !== 'browse') return sendJSON(res, 200, { ...base, tenants: [] });
       return sendJSON(res, 200, { ...base, tenants: buildDirectory(q, tenantId) });
     }
@@ -1326,6 +1337,13 @@ async function handleRequest(req, res) {
     // ---- Health ------------------------------------------------------------
     if (route === 'GET /api/health') {
       return sendJSON(res, 200, { ok: true, time: nowMs() });
+    }
+
+    // ---- Update check (admin-only, queries GitHub releases) ----------------
+    if (route === 'GET /api/admin/update-check') {
+      if (!requireAdmin(res, req)) return;
+      return checkForUpdate().then((info) => sendJSON(res, 200, info))
+        .catch((e) => sendJSON(res, 200, { update_available: false, error: e.message }));
     }
 
     // ---- Tenants -----------------------------------------------------------

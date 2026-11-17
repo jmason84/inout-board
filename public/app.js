@@ -253,6 +253,16 @@ async function refreshTenantsCache() {
 function dayStart() { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); }
 
 async function loadOverview() {
+  // Check for updates (non-blocking)
+  adminFetch('/api/admin/update-check').then((r) => r.ok ? r.json() : null).then((u) => {
+    const banner = $('#updateBanner');
+    if (!u || !u.update_available) { banner.hidden = true; return; }
+    banner.hidden = false;
+    banner.innerHTML = `<strong>Update available:</strong> v${escapeHtml(u.latest_version)}${u.release_name ? ' — ' + escapeHtml(u.release_name) : ''}.`
+      + ` You're running v${escapeHtml(u.current_version)}.`
+      + (u.release_url ? ` <a href="${escapeHtml(u.release_url)}" target="_blank" rel="noopener">View release notes ↗</a>` : '');
+  }).catch(() => {}); // silently ignore
+
   const d = await json(await adminFetch(`/api/admin/overview?day_start=${dayStart()}`));
   const t = d.totals;
   $('#overviewStats').innerHTML = [
@@ -841,6 +851,12 @@ const MODES = [
   { id: 'search', label: 'Search only', desc: 'Visitors must type a name or company to see anyone. Best for privacy on a shared tablet.' },
 ];
 
+const THEMES = [
+  { id: 'light', label: 'Light', desc: 'Always use the light colour scheme.' },
+  { id: 'dark', label: 'Dark', desc: 'Always use the dark colour scheme — ideal for wall-mounted tablets.' },
+  { id: 'system', label: 'Follow device', desc: 'Matches the operating system light/dark setting.' },
+];
+
 async function loadSettings() {
   const st = await json(await adminFetch('/api/admin/settings'));
   const radio = (name, items, value) => items.map((o) => `
@@ -851,14 +867,21 @@ async function loadSettings() {
     </label>`).join('');
   $('#layoutOpts').setAttribute('role', 'radiogroup'); $('#layoutOpts').setAttribute('aria-label', 'Default layout');
   $('#modeOpts').setAttribute('role', 'radiogroup'); $('#modeOpts').setAttribute('aria-label', 'What the board shows');
+  $('#themeOpts').setAttribute('role', 'radiogroup'); $('#themeOpts').setAttribute('aria-label', 'Theme');
   $('#layoutOpts').innerHTML = radio('kiosk_layout', IO.LAYOUTS, st.kiosk_layout);
   $('#modeOpts').innerHTML = radio('kiosk_mode', MODES, st.kiosk_mode);
+  // Theme: show server default, but apply the localStorage override for this browser.
+  if (window.IOPrefs) IOPrefs.applyDefaultTheme(st.theme);
+  const browserTheme = window.IOPrefs ? IOPrefs.getTheme() : st.theme;
+  $('#themeOpts').innerHTML = radio('theme', THEMES, browserTheme);
 }
 
 $('#admin-settings').addEventListener('change', async (e) => {
   const input = e.target.closest('input[type=radio]');
   if (!input) return;
   const res = await adminFetch('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ [input.name]: input.value }) });
+  // Only persist the local choice after the server accepts the setting.
+  if (res.ok && input.name === 'theme' && window.IOPrefs) IOPrefs.setTheme(input.value);
   if (res.ok) { toast('Saved'); await loadSettings(); const again = document.querySelector(`input[name="${input.name}"][value="${input.value}"]`); if (again) again.focus(); } else toast((await json(res)).error || 'Could not save', true);
 });
 

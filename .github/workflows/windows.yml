@@ -19,6 +19,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Validate scripts with Windows PowerShell 5.1
+        shell: powershell
+        run: ./test/windows-syntax.ps1
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -27,6 +30,7 @@ jobs:
 
   installer:
     runs-on: windows-latest
+    timeout-minutes: 20
     needs: test-windows
     env:
       VERSION: 1.0.${{ github.run_number }}
@@ -83,6 +87,8 @@ jobs:
           if (-not $h.ok) { throw 'https health failed WITHOUT skipping certificate checks: CA not trusted' }
           $h = Invoke-RestMethod https://localhost:8443/api/health
           if (-not $h.ok) { throw 'https://localhost not trusted' }
+          $pkg = Get-Content "$env:ProgramFiles\IN-OUT Board\package.json" -Raw | ConvertFrom-Json
+          if ($pkg.version -ne $env:VERSION) { throw "installed version $($pkg.version) does not match $env:VERSION" }
           $ca = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 "$root\InOutBoard-Local-CA.crt"
           if (-not (Get-ChildItem Cert:\LocalMachine\Root | Where-Object Thumbprint -eq $ca.Thumbprint)) { throw 'CA not in LocalMachine Root store' }
           # other devices can download the CA over HTTPS
@@ -106,7 +112,20 @@ jobs:
           $login = Invoke-RestMethod https://127.0.0.1:8443/api/auth/login -Method Post -ContentType 'application/json' -Body (@{ username='admin'; password='admin' } | ConvertTo-Json) -SessionVariable sess
           if (-not $login.must_change) { throw 'admin/admin did not require a password change' }
           try { Invoke-RestMethod https://127.0.0.1:8443/api/tenants -WebSession $sess | Out-Null; throw 'API reachable before password change' } catch { if ($_.Exception.Message -eq 'API reachable before password change') { throw } }
+          # Set a non-default password so repair/upgrade must preserve real credentials.
+          $password = 'installer-regression-password'
+          Invoke-RestMethod https://127.0.0.1:8443/api/auth/password -Method Post -ContentType 'application/json' -WebSession $sess -Body (@{ current='admin'; next=$password } | ConvertTo-Json)
           & "$env:ProgramFiles\IN-OUT Board\InOutBoard.ps1" -Action Status
+
+      - name: Repair preserves the admin password
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $msi = (Get-ChildItem dist/*.msi).FullName
+          $p = Start-Process msiexec.exe -ArgumentList "/fa `"$msi`" /qn /l*v `"$env:RUNNER_TEMP\repair.log`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\repair.log" -Tail 80; throw "repair exit $($p.ExitCode)" }
+          $login = Invoke-RestMethod https://127.0.0.1:8443/api/auth/login -Method Post -ContentType 'application/json' -Body (@{ username='admin'; password='installer-regression-password' } | ConvertTo-Json)
+          if ($login.must_change) { throw 'repair reset the existing password' }
 
       - name: Backup now
         shell: pwsh
@@ -132,6 +151,8 @@ jobs:
           Start-Sleep -Seconds 5
           $h = Invoke-RestMethod https://127.0.0.1:8443/api/health -SkipCertificateCheck
           if (-not $h.ok) { throw 'board not healthy after upgrade' }
+          $login = Invoke-RestMethod https://127.0.0.1:8443/api/auth/login -Method Post -ContentType 'application/json' -Body (@{ username='admin'; password='installer-regression-password' } | ConvertTo-Json)
+          if ($login.must_change) { throw 'upgrade reset the existing password' }
 
       - name: Uninstall keeps data, removes tasks and firewall rule
         shell: pwsh
@@ -208,7 +229,27 @@ jobs:
           if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "setup exe exit $($p.ExitCode)" }
           $h = Invoke-RestMethod https://127.0.0.1:8443/api/health -SkipCertificateCheck
           if (-not $h.ok) { throw 'board not healthy after EXE install' }
-          & $exe /uninstall /quiet /norestart | Out-Null
+          $p = Start-Process $exe -ArgumentList '/uninstall /quiet /norestart' -Wait -PassThru
+          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "setup exe uninstall exit $($p.ExitCode)" }
+
+      - name: Explicit purge removes all data and supports a fresh reinstall
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:ProgramData 'InOutBoard'
+          $msi = (Get-ChildItem dist/*.msi).FullName
+          $p = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "purge fixture install exit $($p.ExitCode)" }
+          $p = Start-Process msiexec.exe -ArgumentList "/x `"$msi`" PURGEDATA=1 /qn /l*v `"$env:RUNNER_TEMP\purge.log`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\purge.log" -Tail 80; throw "purge exit $($p.ExitCode)" }
+          if (Test-Path $root) { throw 'purge left behind or recreated ProgramData' }
+          if (Get-ScheduledTask -TaskName 'IN-OUT Board*' -ErrorAction SilentlyContinue) { throw 'purge left tasks behind' }
+          if (Get-NetFirewallRule -DisplayName 'IN/OUT Board HTTPS' -ErrorAction SilentlyContinue) { throw 'purge left firewall rule behind' }
+          $p = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "fresh reinstall exit $($p.ExitCode)" }
+          $login = Invoke-RestMethod https://127.0.0.1:8443/api/auth/login -Method Post -ContentType 'application/json' -Body (@{ username='admin'; password='admin' } | ConvertTo-Json)
+          if (-not $login.must_change) { throw 'fresh reinstall did not require password change' }
+          $p = Start-Process msiexec.exe -ArgumentList "/x `"$msi`" PURGEDATA=1 /qn" -Wait -PassThru
+          if ($p.ExitCode -ne 0 -or (Test-Path $root)) { throw 'final purge failed' }
 
       - name: Collect installer logs
         if: always()

@@ -71,6 +71,12 @@ if ($LASTEXITCODE -ne 0) { throw 'Bundled Node.js cannot load node:sqlite' }
 
 # ---- the app itself ---------------------------------------------------------
 Copy-Item (Join-Path $Root 'server.js'), (Join-Path $Root 'package.json') $Stage
+# The update checker must report the installed build, not the source placeholder.
+$packagePath = Join-Path $Stage 'package.json'
+$package = Get-Content $packagePath -Raw | ConvertFrom-Json
+$package.version = $Version
+$json = $package | ConvertTo-Json -Depth 10
+[IO.File]::WriteAllText($packagePath, $json, (New-Object Text.UTF8Encoding($false)))
 foreach ($d in @('public', 'scripts')) { Copy-Item (Join-Path $Root $d) (Join-Path $Stage $d) -Recurse }
 # assets/ is deliberately NOT shipped: it holds the original office board photo.
 New-Item -ItemType Directory -Force -Path (Join-Path $Stage 'assets') | Out-Null
