@@ -2,13 +2,15 @@
 
 The app is one Node process plus one folder of data (a SQLite database and uploaded photos). There is nothing else to install: no database server, no `npm install`.
 
-Pick one of the ways below. **Option A (Docker)** is the easiest on Linux; **Option D (Windows installer)** is the easiest on Windows.
+Pick one of the ways below. **Option A (Docker)** and **Option C (`install.sh`)** are the easiest on Linux; **Option D (Windows installer)** is the easiest on Windows.
 
-> **Before you start:** decide how people will reach it. Over plain `http://server-ip:3000` on a trusted office network it works as is. For anything reachable from the internet, put it behind HTTPS (Options A + tunnel, or C) and read "HTTPS and cookies" first.
+> **Before you start:** Docker, `install.sh` and Windows all serve HTTPS on port 8443 by themselves (private CA, see "HTTPS and cookies"). Anyone who can open the board can clock anyone in or out, so keep it on a trusted network until per-person PINs exist.
 
 ---
 
 ## Option A: Docker (recommended)
+
+> **Untested:** the Linux deployment (Docker Compose and `deploy/install.sh`) has not yet been tested on a real Linux server. Only the app's automated tests, a stubbed run of `install.sh` and a Compose file validation have been done; the Docker image, host networking, the backup service, `upgrade.sh`, the systemd units and certificate trust from other devices are unverified. Try Docker and Option C on a test machine first and report problems.
 
 Needs Docker with the Compose plugin.
 
@@ -18,26 +20,26 @@ cd inout-board
 cp .env.example .env
 ```
 
-Edit `.env` and set `ADMIN_USER` and a strong `ADMIN_PASSWORD`, then:
+Edit `.env` if you want to (for example a strong `ADMIN_PASSWORD`). The app container runs on the host network (Docker Engine on Linux; not Docker Desktop), so the certificate automatically covers every address of the server and follows IP changes. Then:
 
 ```bash
 docker compose up -d
 ```
 
-Open `http://<server-ip>:3000` for the kiosk and `http://<server-ip>:3000/admin` to sign in.
+Open `https://<server-ip>:8443` for the kiosk and `https://<server-ip>:8443/admin` to sign in. Your browser warns until the board's private CA is installed (see "HTTPS and cookies").
 
+- First sign-in is `admin` / `admin`; the board makes you choose a new password (10+ characters) before anything else works. Leave `ADMIN_PASSWORD=admin` for this, or set your own to skip it.
 - Data lives in the Docker volume `inout-board_inout-data` and survives restarts and upgrades.
-- If you left `ADMIN_PASSWORD` empty, a random one is printed once: `docker compose logs app`
+- A `backup` service runs `scripts/backup-schedule.js` nightly at `BACKUP_TIME` (default 02:15, time zone `TZ`, keeps `BACKUP_KEEP`=14) into `/data/backups`.
+- The container health check works over HTTPS (`scripts/healthcheck.js`).
+- Docker's json-file log driver is capped at 10 MB x 5 files per service.
 - `ADMIN_USER` / `ADMIN_PASSWORD` are **only read on the very first start**. Afterwards, manage admins in the app (Admin, then Admins). Changing `.env` later does not change existing passwords.
 
 **Update to a newer version**
 
 ```bash
-git pull
-docker compose up -d --build
+./deploy/upgrade.sh          # backs up, git pull, rebuilds, waits for "healthy"
 ```
-
-Back up first (see "Backups").
 
 **Use the prebuilt image instead of building**
 
@@ -51,8 +53,8 @@ docker compose pull && docker compose up -d
 ### Cloudflare Tunnel (no open ports, free HTTPS)
 
 1. In Cloudflare Zero Trust, create a tunnel and copy its token.
-2. Add a public hostname (for example `board.yourdomain.com`) pointing at `http://app:3000`.
-3. In `.env` set `TUNNEL_TOKEN=...`, `COOKIE_SECURE=1` and `TRUST_PROXY=1`.
+2. Add a public hostname (for example `board.yourdomain.com`) pointing at `http://localhost:8443`.
+3. In `.env` set `TUNNEL_TOKEN=...`, `HTTPS=off`, `COOKIE_SECURE=1` and `TRUST_PROXY=1`.
 4. `docker compose --profile tunnel up -d`
 
 You can also put Cloudflare Access in front of `/admin`. The kiosk (`/`) and `/me` need to stay reachable by staff, so protect only `/admin*` if you do. The admin login is still required either way.
@@ -80,29 +82,55 @@ Settings can also live in a file: set `INOUT_ENV_FILE` to a `KEY=VALUE` file. Re
 
 Data is stored in `./data` (override with `DATA_DIR=/some/folder`).
 
-### Keep it running on Linux (systemd)
+---
+
+## Option C: Linux one-step installer (systemd)
+
+> **Untested:** `install.sh` has not been run on a real systemd server yet (see the note under Option A).
+
+```bash
+git clone -b deploy https://github.com/jmason84/inout-board.git
+cd inout-board
+sudo ./deploy/install.sh        # --port N  --addresses 192.168.1.50  --no-firewall  --reset-admin
+```
+
+One-line form (a private repository needs `INOUT_TOKEN=<token>` before `bash`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jmason84/inout-board/main/deploy/install.sh | sudo bash
+```
+
+What it does: installs Node.js 22.5+ if missing (NodeSource), creates the `inout` system user, copies the app to `/opt/inout-board`, writes `/etc/inout-board.env` (`HTTPS=auto`, `PORT=8443`, `admin` / `admin` with `ADMIN_MUST_CHANGE=1`), installs and starts the `inout-board` service, enables a nightly backup timer (`inout-board-backup.timer`, 02:15, keeps 14, into `/var/backups/inout-board`), opens the port in ufw or firewalld if active, and prints the HTTPS URLs.
+
+- **Upgrade:** re-run it from a newer checkout. It takes a backup first, replaces the program files, and keeps `/etc/inout-board.env` and your data.
+- **Reinstall over leftover data** (settings file gone, database still there) resets the admin to `admin` / `admin`, like the Windows installer. `--reset-admin` does the same on demand.
+- Data: `/var/lib/inout-board`. Logs: `journalctl -u inout-board -f`. Backup schedule: `systemctl list-timers inout-board-backup.timer`.
+
+### Doing it by hand
 
 ```bash
 sudo useradd --system --home /opt/inout-board --shell /usr/sbin/nologin inout
-sudo mkdir -p /opt/inout-board /var/lib/inout-board
+sudo mkdir -p /opt/inout-board /var/lib/inout-board /var/backups/inout-board
 sudo cp -r server.js package.json public assets scripts /opt/inout-board/
-sudo chown -R inout:inout /var/lib/inout-board
+sudo chown -R inout:inout /var/lib/inout-board /var/backups/inout-board
 
 sudo tee /etc/inout-board.env >/dev/null <<'EOF'
-PORT=3000
+HTTPS=auto
+PORT=8443
 ADMIN_USER=admin
-ADMIN_PASSWORD=change-this-long-passphrase
-# behind HTTPS only:
-# COOKIE_SECURE=1
-# TRUST_PROXY=1
+ADMIN_PASSWORD=admin
+ADMIN_MUST_CHANGE=1
+# EXTRA_ADDRESSES=192.168.1.50
 EOF
 sudo chmod 600 /etc/inout-board.env
 
-sudo cp deploy/inout-board.service /etc/systemd/system/
+sudo cp deploy/inout-board.service deploy/inout-board-backup.service deploy/inout-board-backup.timer /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now inout-board
+sudo systemctl enable --now inout-board inout-board-backup.timer
 journalctl -u inout-board -f
 ```
+
+For plain HTTP behind your own proxy, put `HTTPS=off`, `PORT=3000`, `TRUST_PROXY=1` and `COOKIE_SECURE=1` in the env file instead.
 
 ---
 
@@ -160,6 +188,8 @@ Sign-in uses a cookie. Two settings matter:
 
 A ready-made Caddy config with automatic certificates is in `deploy/Caddyfile.example`.
 
+**Built-in HTTPS (`HTTPS=auto`, the default for Docker and `install.sh`).** The board creates a private certificate authority and a certificate for this machine's addresses (add names it cannot see, such as a public address or DNS name, with `EXTRA_ADDRESSES`). The certificate is re-issued automatically when addresses change. Each device downloads the CA once from `https://<server-ip>:8443/ca.crt` (the browser warns once) and installs it; per-device steps are in Option D above. On a Linux desktop: copy it to `/usr/local/share/ca-certificates/inout-board.crt` and run `sudo update-ca-certificates` (Debian/Ubuntu), or `sudo trust anchor inout-board.crt` (Fedora); Chrome and Firefox also keep their own authority lists. Cookies are already `Secure` over built-in HTTPS, so `COOKIE_SECURE` is not needed.
+
 ---
 
 ## Backups
@@ -176,7 +206,7 @@ node scripts/backup.js ./backups          # honours DATA_DIR, KEEP=14 by default
 
 Each run creates `inout-YYYYMMDD-HHMMSS/` with `inout.sqlite` and `uploads/`, and keeps the newest 14.
 
-**Nightly (cron, plain Node):**
+**Nightly:** automatic with Docker (`backup` service) and `install.sh` (systemd timer), both at 02:15 and keeping 14. For a hand-made plain Node install, use cron:
 
 ```
 15 2 * * *  cd /opt/inout-board && DATA_DIR=/var/lib/inout-board node scripts/backup.js /var/backups/inout-board
@@ -211,12 +241,13 @@ docker compose start app
 
 ## Health check and troubleshooting
 
-- `GET /api/health` returns `{"ok":true}`. Docker uses it for its healthcheck.
+- `GET /api/health` returns `{"ok":true}`. Docker uses it for its healthcheck (`scripts/healthcheck.js`, works over HTTPS). Manual check: `curl -k https://<server-ip>:8443/api/health`.
 - **"Cross-origin request blocked" when signing in:** you are behind a proxy/tunnel on an old version. Update to the latest code (it uses the browser's `Sec-Fetch-Site` header). If an unusual proxy still strips it, set `TRUST_PROXY=1` and/or `ALLOWED_ORIGINS=https://your.public.address`.
 - **Can't sign in:** wrong address scheme with `COOKIE_SECURE=1` (see above), or you were throttled (8 failed tries in 15 minutes per address; wait or restart the app).
-- **Lost the admin password (or `admin` / `admin` does not work):** `admin` / `admin` only applies to a brand-new data folder. An existing install keeps its existing admin account and the password that was generated for it. Reset it with `node scripts/reset-admin.js` (creates or resets `admin` / `admin`, and you are asked for a new password at sign-in; other admins are untouched), `docker compose exec app node scripts/reset-admin.js`, or on Windows `InOutBoard.ps1 -Action ResetAdmin` from an elevated PowerShell. To set a specific password instead: `node scripts/reset-admin.js jordan 'a-long-passphrase'`.
+- **Lost the admin password (or `admin` / `admin` does not work):** `admin` / `admin` only applies to a brand-new data folder. An existing install keeps its existing admin account and the password that was generated for it. Reset it with `node scripts/reset-admin.js` (creates or resets `admin` / `admin`, and you are asked for a new password at sign-in; other admins are untouched), `docker compose exec app node scripts/reset-admin.js`, on a systemd install `sudo -u inout DATA_DIR=/var/lib/inout-board node /opt/inout-board/scripts/reset-admin.js` (or `sudo ./deploy/install.sh --reset-admin`), or on Windows `InOutBoard.ps1 -Action ResetAdmin` from an elevated PowerShell. To set a specific password instead: `node scripts/reset-admin.js jordan 'a-long-passphrase'`.
 - **Photos don't show after a restore:** the `uploads/` folder wasn't restored alongside the database.
-- **Port already in use:** change `HOST_PORT` (Docker) or `PORT` (plain Node).
+- **Port already in use:** change `HOST_PORT` (Docker, since the app uses the host network) or `PORT` (`/etc/inout-board.env` or plain Node).
+- **Certificate warning even after installing the CA, or a name mismatch:** the address you typed is not in the certificate. It is probably a public address or DNS name the server cannot see itself: add it to `EXTRA_ADDRESSES` (Docker: `.env`, then `docker compose up -d`; systemd: `/etc/inout-board.env`, then `sudo systemctl restart inout-board`).
 
 ## Security checklist
 

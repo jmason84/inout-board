@@ -16,5 +16,10 @@ jobs:
         run: |
           node --check server.js
           for f in public/*.js scripts/*.js test/*.js; do node --check "$f"; done
+          for f in deploy/*.sh; do bash -n "$f"; done
+      - name: Compose file
+        run: |
+          cp .env.example .env
+          docker compose config -q
       - name: Smoke test
         run: npm test

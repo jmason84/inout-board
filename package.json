@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node --test test/prefs.js test/update-check.js test/demo.js && node test/smoke.js",
+    "test": "node --test test/prefs.js test/update-check.js test/demo.js test/linux-deploy.js && node test/smoke.js",
     "backup": "node scripts/backup.js",
     "seed:demo": "node scripts/seed-demo.js",
     "screenshots": "node scripts/screenshots.js",
