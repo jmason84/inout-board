@@ -66,7 +66,9 @@ $cv = $rel.tag_name.TrimStart('v')
 $zipAsset = $rel.assets | Where-Object { $_.name -eq "caddy_${cv}_windows_amd64.zip" }
 $sumAsset = $rel.assets | Where-Object { $_.name -eq "caddy_${cv}_checksums.txt" }
 if (-not $zipAsset -or -not $sumAsset) { throw "Caddy $cv assets not found" }
-$caddySums = (Invoke-WebRequest -Uri $sumAsset.browser_download_url -UseBasicParsing).Content -split "`n"
+$sumFile = Join-Path $Dl $sumAsset.name
+Invoke-WebRequest -Uri $sumAsset.browser_download_url -OutFile $sumFile -UseBasicParsing
+$caddySums = Get-Content -Path $sumFile
 $caddyLine = $caddySums | Where-Object { $_ -match [regex]::Escape($zipAsset.name) + '\s*$' } | Select-Object -First 1
 if (-not $caddyLine) { throw 'Caddy checksum line not found' }
 $caddyHash = ($caddyLine.Trim() -split '\s+')[0]
