@@ -174,7 +174,10 @@ Rules:
 | `ALLOWED_ORIGINS` | unset | Extra origins allowed to POST (rarely needed) |
 | `INOUT_ENV_FILE` | unset | Path to a `KEY=VALUE` settings file (used by the Windows installer). Real environment variables win over the file |
 | `PREFERRED_ADDRESS` | active route | Which address is listed first in the startup links. Only changes the display; the app still listens on every address |
-| `PUBLIC_SCHEME` / `PUBLIC_PORT` | `http` / `PORT` | How the startup links are written when HTTPS is terminated in front of the app |
+| `PUBLIC_SCHEME` / `PUBLIC_PORT` | `http` (`https` with built-in TLS) / `PORT` | How the startup links are written when HTTPS is terminated in front of the app |
+| `HTTPS` | unset | `auto`: serve HTTPS directly with a private CA and a certificate for this machine's addresses (CA at `/ca.crt`) |
+| `TLS_DIR` | `DATA_DIR/tls` | Where the private CA and server certificate are kept (`HTTPS=auto`) |
+| `TLS_CERT` / `TLS_KEY` | unset | Your own certificate and key files; used instead of `HTTPS=auto`, re-read every 6 hours |
 
 ## API endpoints
 
@@ -298,18 +301,18 @@ sudo systemctl daemon-reload && sudo systemctl enable --now inout-board
 journalctl -u inout-board -f
 ```
 
-**HTTPS on Linux:** put Caddy or nginx in front and set `TRUST_PROXY=1` and `COOKIE_SECURE=1`. A ready Caddy config with automatic certificates is in [`deploy/Caddyfile.example`](deploy/Caddyfile.example).
+**HTTPS on Linux:** either set `HTTPS=auto` (the board creates its own private CA and certificate; devices install `https://<host>:<port>/ca.crt` once) or put Caddy or nginx in front and set `TRUST_PROXY=1` and `COOKIE_SECURE=1`. A ready Caddy config with automatic certificates is in [`deploy/Caddyfile.example`](deploy/Caddyfile.example).
 
 **Nightly backup (cron):** `15 2 * * *  cd /opt/inout-board && DATA_DIR=/var/lib/inout-board node scripts/backup.js /var/backups/inout-board` (keeps 14; copy them off the machine too).
 
 ### Deploying on Windows
 
-Download the installer from the **Windows installer** workflow run in the repository's *Actions* tab (artifact `InOutBoard-windows-<version>`), or from a release once one is published:
+Download the installer from the **Windows installer** workflow run in the repository's *Actions* tab (artifacts `InOutBoard-msi-<version>` and `InOutBoard-setup-exe-<version>`), or from a release once one is published:
 
 - `InOutBoard-<version>-x64.msi`: for IT, scripting and silent installs.
 - `InOutBoard-Setup-<version>-x64.exe`: double-click installer that wraps the same MSI.
 
-Node.js and the HTTPS front end (Caddy) are inside the package; there is nothing else to install.
+Node.js is inside the package and the board serves HTTPS itself; there is nothing else to install.
 
 ```powershell
 # interactive: double-click the EXE or MSI, or silent (run as Administrator):
@@ -322,8 +325,8 @@ msiexec /x InOutBoard-1.0.0-x64.msi /qn
 
 What you get:
 
-- The app and an HTTPS front end start at boot and restart themselves if they stop. The app listens **only on `127.0.0.1:3000`**; HTTPS (default port **8443**) is served on every address of the PC. Only the HTTPS port is opened in Windows Firewall.
-- Open `https://<this-PC-IP>:8443/` (admin at `/admin`). Addresses are re-discovered at every start, so a changed IP is followed by HTTPS within about 30 seconds. Run `InOutBoard.ps1 -Action Status` (in `C:\Program Files\IN-OUT Board`) to list every URL.
+- The board starts at boot and restarts itself if it stops. It serves HTTPS (default port **8443**) on every address of the PC, and only that one TCP port is opened in Windows Firewall.
+- Open `https://<this-PC-IP>:8443/` (admin at `/admin`). Addresses are re-discovered at every start and checked every minute, so a changed IP gets a matching certificate without a restart. Run `InOutBoard.ps1 -Action Status` (in `C:\Program Files\IN-OUT Board`) to list every URL.
 - Everything you would back up or edit is in `C:\ProgramData\InOutBoard\`: `inout-board.env` (settings), `data\` (database and photos), `backups\` (nightly at 02:15, keeps 14) and `logs\`. Upgrades and uninstalls never delete that folder.
 - First sign-in: user `admin`, password `admin`. The board makes you choose a new password (10 or more characters) before anything else works, so do this straight after installing and before exposing the board beyond your office network.
 - Upgrade by running a newer MSI or EXE over the old one.
@@ -338,7 +341,7 @@ Install it once on each device (without it the connection is still encrypted, bu
 - **Android:** *Settings, Security, Encryption & credentials, Install a certificate, CA certificate*.
 - **Firefox** keeps its own list: set `security.enterprise_roots.enabled` to `true` in `about:config` to use the Windows one.
 
-To use a publicly trusted certificate for a public IP instead, set `TLS_CERT_FILE` and `TLS_KEY_FILE` in `inout-board.env` and restart. Automatic renewal of short-lived public IP certificates is not built in yet.
+To use a publicly trusted certificate for a public IP instead, set `TLS_CERT` and `TLS_KEY` (paths to the certificate and key files) in `inout-board.env` and restart. The files are re-read every 6 hours, so a renewed certificate is picked up without a restart. Automatic renewal of short-lived public IP certificates is not built in yet.
 
 **Reaching it from outside the office.** Reserve the PC's LAN address in your router (DHCP reservation), forward one public HTTPS port to the same port on the PC, and test from a device outside your network. If your ISP uses carrier-grade NAT, use a VPN or tunnel instead. Anyone who can open the board can still clock anyone in or out, so do not rely on internet exposure until the per-person PIN (see Roadmap) exists.
 
