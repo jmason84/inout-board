@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased (codex/windows-wan-deployment)
+- Windows installer: MSI and Setup EXE (WiX) bundling Node.js and Caddy; start-at-boot tasks, HTTPS on any IP, firewall rule for the TLS port only, nightly backup, data kept in ProgramData across upgrades and uninstalls.
+- Address discovery at startup (`scripts/netinfo.js`) with an optional `PREFERRED_ADDRESS`; every reachable URL is logged.
+- `INOUT_ENV_FILE` settings file support.
+- GitHub Actions workflow builds the installers on Windows and tests install, HTTPS, backup, upgrade and uninstall.
+
 ## Unreleased (feature/csv-and-pages)
 - CSV import (with preview and problem report) and export of all people.
 - GitHub Pages site: landing page, real screenshots and an interactive in-browser demo.

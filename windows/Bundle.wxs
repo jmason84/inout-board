@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  InOutBoard-Setup.exe: a double-click installer that wraps the MSI.
+  It installs with the MSI's defaults (HTTPS on port 8443). To choose a port or
+  extra addresses, run the MSI directly with msiexec (see Package.wxs).
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
+  <Bundle Name="IN/OUT Board"
+          Manufacturer="Launch Collective"
+          Version="$(Version)"
+          UpgradeCode="55440e4b-d362-463d-b54f-75f2470ccd9b">
+
+    <BootstrapperApplication>
+      <bal:WixStandardBootstrapperApplication Theme="hyperlinkLicense" LicenseUrl="" />
+    </BootstrapperApplication>
+
+    <Chain>
+      <MsiPackage Id="InOutBoardMsi" SourceFile="$(MsiPath)" Vital="yes" />
+    </Chain>
+  </Bundle>
+</Wix>

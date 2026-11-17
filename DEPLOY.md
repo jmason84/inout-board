@@ -2,7 +2,7 @@
 
 The app is one Node process plus one folder of data (a SQLite database and uploaded photos). There is nothing else to install: no database server, no `npm install`.
 
-Pick one of the three ways below. **Option A (Docker)** is the easiest.
+Pick one of the ways below. **Option A (Docker)** is the easiest on Linux; **Option D (Windows installer)** is the easiest on Windows.
 
 > **Before you start:** decide how people will reach it. Over plain `http://server-ip:3000` on a trusted office network it works as is. For anything reachable from the internet, put it behind HTTPS (Options A + tunnel, or C) and read "HTTPS and cookies" first.
 
@@ -69,6 +69,15 @@ cd inout-board
 ADMIN_USER=admin ADMIN_PASSWORD='a-long-passphrase' PORT=3000 node server.js
 ```
 
+On Windows PowerShell the same thing is (use Option D below for a real install):
+
+```powershell
+$env:ADMIN_USER = 'admin'; $env:ADMIN_PASSWORD = 'a-long-passphrase'; $env:PORT = '3000'
+node server.js
+```
+
+Settings can also live in a file: set `INOUT_ENV_FILE` to a `KEY=VALUE` file. Real environment variables always win over the file.
+
 Data is stored in `./data` (override with `DATA_DIR=/some/folder`).
 
 ### Keep it running on Linux (systemd)
@@ -94,6 +103,35 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now inout-board
 journalctl -u inout-board -f
 ```
+
+---
+
+## Option D: Windows installer (MSI and Setup EXE)
+
+Download `InOutBoard-<version>-x64.msi` (or `InOutBoard-Setup-<version>-x64.exe`, which wraps the same MSI) from the **Windows installer** workflow run in GitHub Actions (artifact) or from a release. Nothing else needs installing: Node.js and the HTTPS front end (Caddy) are inside the package.
+
+What it sets up:
+
+- Program in `C:\Program Files\IN-OUT Board\`. Settings, data, photos, backups and logs in `C:\ProgramData\InOutBoard\` (administrators and SYSTEM only). Upgrades and uninstalls never delete that folder.
+- Two start-at-boot tasks run as SYSTEM and restart themselves if they stop: the app (listening **only** on `127.0.0.1:3000`) and Caddy (HTTPS on every address of the PC, default port **8443**).
+- Only the HTTPS port is opened in Windows Firewall. The internal port is never exposed.
+- A nightly backup at 02:15 that keeps 14.
+- Addresses are re-discovered at every start (no hard-coded IP), so a changed IP only needs a restart. The app logs every URL it can be reached on.
+
+```powershell
+# silent install, HTTPS on 443, also serve the public WAN address
+msiexec /i InOutBoard-1.0.0-x64.msi /qn TLSPORT=443 EXTRAADDRESSES=203.0.113.7
+# status, URLs, client CA file
+powershell -ExecutionPolicy Bypass -File "C:\Program Files\IN-OUT Board\InOutBoard.ps1" -Action Status
+```
+
+First admin password: printed once in `C:\ProgramData\InOutBoard\logs\app.log` unless you set `ADMIN_PASSWORD` in `inout-board.env` before the first start.
+
+**Certificates.** HTTPS on an IP address needs a certificate for that exact IP. The installer uses Caddy's private CA, so each client device must trust `C:\ProgramData\InOutBoard\InOutBoard-Local-CA.crt` or the browser warns. For a public WAN IP you can supply a publicly trusted certificate with `TLS_CERT_FILE` / `TLS_KEY_FILE` in `inout-board.env`. Automatic renewal of short-lived public IP certificates is **not** built in yet.
+
+**Reaching it from the internet.** Reserve the PC's LAN address in DHCP, forward one public HTTPS port on the router to that port on the PC, and test from outside the office. Anyone who can open the board can still clock anyone in or out, so don't rely on internet exposure until per-person PINs exist.
+
+Build it yourself: `powershell -File windows\build.ps1 -Version 1.0.0` on Windows with the WiX CLI (see the script header). The files are unsigned, so SmartScreen will warn until they are code-signed.
 
 ---
 

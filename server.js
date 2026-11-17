@@ -17,6 +17,25 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 
+// Optional settings file (KEY=VALUE per line, # comments). Used by the Windows
+// installer so settings live in one file instead of the service definition.
+// Variables already set in the real environment always win.
+if (process.env.INOUT_ENV_FILE) {
+  try {
+    for (const line of fs.readFileSync(process.env.INOUT_ENV_FILE, 'utf8').split(/\r?\n/)) {
+      const m = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line);
+      if (!m || line.trim().startsWith('#')) continue;
+      let v = m[2];
+      if (/^(["']).*\1$/.test(v)) v = v.slice(1, -1);
+      if (process.env[m[1]] === undefined) process.env[m[1]] = v;
+    }
+  } catch (err) {
+    console.error(`Could not read INOUT_ENV_FILE (${process.env.INOUT_ENV_FILE}): ${err.message}`);
+    process.exit(1);
+  }
+}
+const netinfo = require('./scripts/netinfo');
+
 const PORT = Number(process.env.PORT || 3000);
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const TRUST_PROXY = process.env.TRUST_PROXY === '1';
@@ -1558,4 +1577,25 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`IN/OUT Board server listening on http://${HOST}:${PORT}`);
   console.log('Kiosk: /   Admin console: /admin');
+  logAddresses();
 });
+
+// Show every address the board can be reached on, so nobody has to guess.
+// Re-run on SIGHUP-less platforms by simply restarting; nothing is cached.
+async function logAddresses() {
+  try {
+    const info = await netinfo.discover();
+    const wildcard = HOST === '0.0.0.0' || HOST === '::';
+    const shown = wildcard ? info.addresses : info.addresses.filter((a) => a.address === HOST);
+    const scheme = process.env.PUBLIC_SCHEME || 'http';
+    const port = process.env.PUBLIC_PORT || PORT;
+    if (!shown.length) return;
+    console.log(`Reachable at (${wildcard ? 'all interfaces' : HOST}):`);
+    for (const a of shown) {
+      const star = a.address === info.preferred ? '  <- preferred' : '';
+      console.log(`  ${netinfo.urlFor(scheme, a.address, port)}${star}`);
+    }
+  } catch (err) {
+    console.error('Address discovery failed:', err.message);
+  }
+}

@@ -1,0 +1,161 @@
+name: Windows installer
+
+# Builds the MSI and the Setup EXE on a Windows runner, installs the MSI for
+# real, checks the board answers over HTTPS, upgrades it, uninstalls it, and
+# only then publishes the files as a build artifact (and on a v* tag, as a
+# GitHub release).
+
+on:
+  push:
+    branches: ['codex/**', main, deploy]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Smoke test on Windows
+        run: npm test
+
+  installer:
+    runs-on: windows-latest
+    needs: test-windows
+    env:
+      VERSION: 1.0.${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install WiX
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          wix extension add -g WixToolset.BootstrapperApplications.wixext/5.0.2
+          wix --version
+
+      - name: Build MSI and Setup EXE
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./windows/build.ps1 -Version $env:VERSION
+
+      - name: Install the MSI silently
+        shell: pwsh
+        run: |
+          $msi = (Get-ChildItem dist/*.msi).FullName
+          $p = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /l*v `"$env:RUNNER_TEMP\install.log`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\install.log" -Tail 80; throw "msiexec exit $($p.ExitCode)" }
+
+      - name: Check the installed board
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:ProgramData 'InOutBoard'
+          'tasks:'; Get-ScheduledTask -TaskName 'IN-OUT Board*' | Format-Table TaskName, State
+          if ((Get-ScheduledTask -TaskName 'IN-OUT Board*').Count -ne 3) { throw 'expected 3 scheduled tasks' }
+          if (-not (Get-NetFirewallRule -DisplayName 'IN/OUT Board HTTPS' -ErrorAction SilentlyContinue)) { throw 'firewall rule missing' }
+          foreach ($f in 'inout-board.env','data\inout.sqlite','InOutBoard-Local-CA.crt') {
+            if (-not (Test-Path (Join-Path $root $f))) { Get-ChildItem $root -Recurse | Select-Object FullName; Get-Content "$root\logs\*.log" -ErrorAction SilentlyContinue; throw "missing $f" }
+          }
+          # internal port answers on loopback only
+          $h = Invoke-RestMethod http://127.0.0.1:3000/api/health
+          if (-not $h.ok) { throw 'internal health failed' }
+          # HTTPS front end answers on the loopback and on this runner's LAN address
+          $h = Invoke-RestMethod https://127.0.0.1:8443/api/health -SkipCertificateCheck
+          if (-not $h.ok) { throw 'https health failed' }
+          $lan = (& "$env:ProgramFiles\IN-OUT Board\node.exe" "$env:ProgramFiles\IN-OUT Board\scripts\netinfo.js" --plain) | Select-Object -First 1
+          if ($lan) {
+            $h = Invoke-RestMethod "https://${lan}:8443/api/health" -SkipCertificateCheck
+            if (-not $h.ok) { throw "https health failed on $lan" }
+            "HTTPS OK on $lan"
+          }
+          # the internal HTTP port must not be reachable on the LAN address
+          if ($lan) {
+            $open = $false
+            try { Invoke-WebRequest "http://${lan}:3000/api/health" -TimeoutSec 4 -UseBasicParsing | Out-Null; $open = $true } catch {}
+            if ($open) { throw "internal port 3000 is reachable on $lan" }
+          }
+          # the first-run password was logged exactly where the README says
+          if (-not (Select-String -Path "$root\logs\app.log" -Pattern 'Generated password' -Quiet)) { throw 'first-run password not in app.log' }
+          & "$env:ProgramFiles\IN-OUT Board\InOutBoard.ps1" -Action Status
+
+      - name: Backup now
+        shell: pwsh
+        run: |
+          & "$env:ProgramFiles\IN-OUT Board\InOutBoard.ps1" -Action Backup
+          if (-not (Get-ChildItem "$env:ProgramData\InOutBoard\backups\inout-*\inout.sqlite")) { throw 'no backup produced' }
+
+      - name: Real upgrade (newer MSI over the installed one) keeps data and settings
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:ProgramData 'InOutBoard'
+          Add-Content "$root\inout-board.env" "`n# survived-upgrade-marker"
+          # Same staged files, newer version number: exercises the MajorUpgrade path.
+          $newer = "1.1.$env:GITHUB_RUN_NUMBER"
+          New-Item -ItemType Directory -Force upgrade | Out-Null
+          wix build windows/Package.wxs -arch x64 -d "Version=$newer" -d "StageDir=$PWD\build\windows\stage" -o "upgrade\InOutBoard-$newer-x64.msi"
+          if ($LASTEXITCODE -ne 0) { throw 'could not build upgrade MSI' }
+          $p = Start-Process msiexec.exe -ArgumentList "/i `"$PWD\upgrade\InOutBoard-$newer-x64.msi`" /qn /l*v `"$env:RUNNER_TEMP\upgrade.log`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\upgrade.log" -Tail 80; throw "upgrade exit $($p.ExitCode)" }
+          if (-not (Select-String -Path "$root\inout-board.env" -Pattern 'survived-upgrade-marker' -Quiet)) { throw 'settings lost on upgrade' }
+          if (-not (Test-Path "$root\data\inout.sqlite")) { throw 'database lost on upgrade' }
+          if ((Get-ScheduledTask -TaskName 'IN-OUT Board*').Count -ne 3) { throw 'tasks missing after upgrade' }
+          Start-Sleep -Seconds 5
+          $h = Invoke-RestMethod https://127.0.0.1:8443/api/health -SkipCertificateCheck
+          if (-not $h.ok) { throw 'board not healthy after upgrade' }
+
+      - name: Uninstall keeps data, removes tasks and firewall rule
+        shell: pwsh
+        run: |
+          $msi = (Get-ChildItem upgrade/*.msi).FullName
+          $p = Start-Process msiexec.exe -ArgumentList "/x `"$msi`" /qn /l*v `"$env:RUNNER_TEMP\uninstall.log`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\uninstall.log" -Tail 80; throw "uninstall exit $($p.ExitCode)" }
+          if (Get-ScheduledTask -TaskName 'IN-OUT Board*' -ErrorAction SilentlyContinue) { throw 'tasks left behind' }
+          if (Get-NetFirewallRule -DisplayName 'IN/OUT Board HTTPS' -ErrorAction SilentlyContinue) { throw 'firewall rule left behind' }
+          if (Test-Path "$env:ProgramFiles\IN-OUT Board\server.js") { throw 'program files left behind' }
+          if (-not (Test-Path "$env:ProgramData\InOutBoard\data\inout.sqlite")) { throw 'data was deleted' }
+
+      - name: Setup EXE installs silently
+        shell: pwsh
+        run: |
+          $exe = (Get-ChildItem dist/*.exe).FullName
+          $p = Start-Process $exe -ArgumentList '/quiet /norestart' -Wait -PassThru
+          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "setup exe exit $($p.ExitCode)" }
+          $h = Invoke-RestMethod https://127.0.0.1:8443/api/health -SkipCertificateCheck
+          if (-not $h.ok) { throw 'board not healthy after EXE install' }
+          & $exe /uninstall /quiet /norestart | Out-Null
+
+      - name: Collect installer logs
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force installer-logs | Out-Null
+          Copy-Item "$env:RUNNER_TEMP\*.log" installer-logs -ErrorAction SilentlyContinue
+          Copy-Item "$env:ProgramData\InOutBoard\logs\*.log" installer-logs -ErrorAction SilentlyContinue
+
+      - name: Keep installer logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-logs
+          path: installer-logs
+          if-no-files-found: ignore
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: InOutBoard-windows-${{ env.VERSION }}
+          path: dist/*
+
+      - name: Attach to GitHub release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${{ github.ref_name }}" dist/* --generate-notes
