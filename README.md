@@ -8,6 +8,19 @@ console with a time log. One Node.js process and one SQLite file; no database se
 
 ### 👉 [Try the live demo](https://jmason84.github.io/inout-board/app/index.html) &nbsp;·&nbsp; [Project site](https://jmason84.github.io/inout-board/)
 
+## Downloads and installation
+
+| Platform | Quick links | Status |
+|----------|-------------|--------|
+| **Windows x64 — main branch (1.0.19)** | **[Download Setup EXE](https://github.com/jmason84/inout-board/actions/runs/44037258247/artifacts/14307529274)** · **[Download MSI](https://github.com/jmason84/inout-board/actions/runs/44037258247/artifacts/14307752843)** | Latest successful installer build from `main`, verified November 17, 2026. |
+| **Windows x64 — newer preview (1.0.24)** | [Download Setup EXE](https://github.com/jmason84/inout-board/actions/runs/44042496793/artifacts/14309728770) · [Download MSI](https://github.com/jmason84/inout-board/actions/runs/44042496793/artifacts/14311175076) | Latest successful Windows build, verified November 17, 2026; includes the Settings updater from [open PR #10](https://github.com/jmason84/inout-board/pull/10), which is not merged into `main` yet. |
+| **Linux — Docker Compose or systemd** | **[Installation instructions](#deploying-on-linux)** · [Compose file](docker-compose.yml) | Current installation methods on `main`; no packaged Linux installer release is published. |
+| **Linux — one-step installer preview** | [Installer script](https://github.com/jmason84/inout-board/blob/codex/linux-deployment/deploy/install.sh) · [Preview installation instructions](https://github.com/jmason84/inout-board/blob/codex/linux-deployment/README.md#deploying-on-linux) | Available on `codex/linux-deployment`; not merged into `main` and not yet tested on a real Linux server. |
+
+**Windows downloads:** GitHub Actions downloads require a GitHub sign-in and arrive as ZIP files. Extract the ZIP, then run the EXE or MSI. These artifacts expire on February 15, 2027. For newer builds, use the **[Windows installer build list](https://github.com/jmason84/inout-board/actions/workflows/windows.yml?query=is%3Asuccess)** and select the newest successful run for your branch, then its MSI or Setup EXE under **Artifacts**.
+
+**[Latest published release](https://github.com/jmason84/inout-board/releases/latest):** currently the older v1.0 delivery ZIP; it does not contain the Windows MSI/EXE or the Linux one-step installer.
+
 <p align="center"><img src="docs/screenshots/home-table.png" alt="The public board in table layout, listing each tenant with its logo, office, phone and email, and an IN or OUT button for each person" width="900"></p>
 
 > The demo runs the real front end against a small in-browser backend with made-up people, because GitHub Pages can only serve static files. Admin sign-in is `demo` / `demo`. Nothing leaves your browser.
@@ -16,7 +29,7 @@ console with a time log. One Node.js process and one SQLite file; no database se
 
 ## Contents
 
-[Features](#features) · [Screenshots](#screenshots) · [Quick start](#quick-start) · [How it works](#how-it-works) · [CSV import and export](#csv-import-and-export) · [Configuration](#configuration) · [API](#api-endpoints) · [Development](#development) · [Deploying on Linux and Windows](#deploying) · [Roadmap](#roadmap)
+[Downloads and installation](#downloads-and-installation) · [Features](#features) · [Screenshots](#screenshots) · [Quick start](#quick-start) · [How it works](#how-it-works) · [CSV import and export](#csv-import-and-export) · [Configuration](#configuration) · [API](#api-endpoints) · [Development](#development) · [Deploying on Linux and Windows](#deploying) · [Roadmap](#roadmap)
 
 ## Features
 
@@ -312,7 +325,7 @@ journalctl -u inout-board -f
 
 ### Deploying on Windows
 
-Download the installer from the **Windows installer** workflow run in the repository's *Actions* tab (artifacts `InOutBoard-msi-<version>` and `InOutBoard-setup-exe-<version>`), or from a release once one is published:
+Use the **[download links at the top of this README](#downloads-and-installation)** for the latest verified main-branch and preview installers. For subsequent builds, open the [Windows installer build list](https://github.com/jmason84/inout-board/actions/workflows/windows.yml?query=is%3Asuccess), select a successful run for your branch, and download its MSI or Setup EXE under **Artifacts**:
 
 - `InOutBoard-<version>-x64.msi`: for IT, scripting and silent installs.
 - `InOutBoard-Setup-<version>-x64.exe`: double-click installer that wraps the same MSI.
