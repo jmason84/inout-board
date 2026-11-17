@@ -35,6 +35,7 @@ test('Linux defaults: HTTPS on 8443 in Dockerfile, compose and service unit', ()
   const read = (f) => fs.readFileSync(path.join(root, f), 'utf8');
   assert.match(read('Dockerfile'), /HTTPS=auto/);
   assert.match(read('Dockerfile'), /EXPOSE 8443/);
+  assert.match(read('docker-compose.yml'), /network_mode: host/);
   assert.match(read('docker-compose.yml'), /backup-schedule\.js/);
   assert.match(read('docker-compose.yml'), /ADMIN_PASSWORD: \$\{ADMIN_PASSWORD:-admin\}/);
   assert.match(read('deploy/inout-board.service'), /Environment=HTTPS=auto/);

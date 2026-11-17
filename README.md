@@ -285,16 +285,16 @@ Both options give you the Windows experience: HTTPS on port **8443** with the bo
 ```bash
 git clone https://github.com/jmason84/inout-board.git
 cd inout-board
-cp .env.example .env          # optional, but set EXTRA_ADDRESSES to the server's LAN IP
+cp .env.example .env          # optional
 docker compose up -d          # https://<server-ip>:8443  and  /admin
 ```
 
 - Sign in as `admin` / `admin`; you must choose a new password (10+ characters) before anything else works. Do this straight away, before anyone else can reach the board. To skip the default, set `ADMIN_PASSWORD` in `.env` before the first start.
-- Inside Docker the app cannot see the server's LAN address, so put it in `EXTRA_ADDRESSES` (for example `192.168.1.50,board.office.lan`) so the certificate matches. Without it the certificate covers only the container.
+- The app container uses host networking, so it sees the server's real addresses and the certificate covers all of them automatically (re-checked every minute, so a changed IP just works). This needs Docker Engine on Linux, not Docker Desktop. Add names it cannot see itself (a public address, a DNS name) with `EXTRA_ADDRESSES` in `.env`. Open the port (default 8443) in your firewall if one is active.
 - Data lives in the `inout-board_inout-data` Docker volume and survives restarts and upgrades. The `backup` service writes nightly backups to `/data/backups` in the same volume (`BACKUP_TIME`, `BACKUP_KEEP`, `TZ` in `.env`); copy them off the server too.
 - Update: `./deploy/upgrade.sh` backs up, pulls, rebuilds and waits until the health check passes.
 - Logs are rotated by Docker (10 MB x 5 files per service).
-- Behind a tunnel or reverse proxy instead: set `HTTPS=off`, `COOKIE_SECURE=1`, `TRUST_PROXY=1` and point the proxy at `http://app:8443`. Free HTTPS without opening ports: `docker compose --profile tunnel up -d` with a Cloudflare Tunnel token (`TUNNEL_TOKEN`).
+- Behind a tunnel or reverse proxy instead: set `HTTPS=off`, `COOKIE_SECURE=1`, `TRUST_PROXY=1` and point the proxy at `http://localhost:8443`. Free HTTPS without opening ports: `docker compose --profile tunnel up -d` with a Cloudflare Tunnel token (`TUNNEL_TOKEN`).
 - Prebuilt image: pushing the `deploy` branch or a `v*` tag publishes `ghcr.io/jmason84/inout-board` (`.github/workflows/docker.yml`).
 
 **Option 2: one-step install on a bare-metal server or VM** (systemd; Node.js 22.5+ is installed for you if missing).

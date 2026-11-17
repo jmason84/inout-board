@@ -1,15 +1,19 @@
 # IN/OUT Board - docker compose
 #
-#   cp .env.example .env     # optional: set EXTRA_ADDRESSES to this server's LAN IP
+#   cp .env.example .env     # optional
 #   docker compose up -d     # https://<server-ip>:8443  (admin / admin, you must change it at first sign-in)
 #
 # Defaults match the Windows installer: built-in HTTPS on 8443 (private CA, served at /ca.crt),
 # admin/admin with a forced password change, and a nightly backup at 02:15 (keeps 14).
 #
+# The app uses host networking so it sees the server's real LAN addresses and puts them in
+# its certificate (re-checked every minute, so a changed IP just works). This needs Docker
+# Engine on Linux; Docker Desktop (Mac/Windows) does not support it.
+#
 # Optional Cloudflare Tunnel (no open ports needed):
 #   set TUNNEL_TOKEN, HTTPS=off, COOKIE_SECURE=1 and TRUST_PROXY=1 in .env, then:
 #   docker compose --profile tunnel up -d
-#   (point the tunnel's public hostname at  http://app:8443 )
+#   (point the tunnel's public hostname at  http://localhost:8443 )
 
 x-logging: &logging
   driver: json-file
@@ -25,13 +29,12 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      PORT: "8443"
+      PORT: ${HOST_PORT:-8443}
       HTTPS: ${HTTPS:-auto}
       DATA_DIR: /data
       ADMIN_USER: ${ADMIN_USER:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
-    ports:
-      - "${HOST_PORT:-8443}:8443"
+    network_mode: host
     volumes:
       - inout-data:/data
     logging: *logging
@@ -62,6 +65,7 @@ services:
     container_name: inout-board-tunnel
     restart: unless-stopped
     command: tunnel --no-autoupdate run
+    network_mode: host
     environment:
       TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
     depends_on:

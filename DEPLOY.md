@@ -18,7 +18,7 @@ cd inout-board
 cp .env.example .env
 ```
 
-Edit `.env` if you want to: set `EXTRA_ADDRESSES` to the server's LAN IP and/or name (the certificate needs it, because the container cannot see the host's address), and optionally a strong `ADMIN_PASSWORD`. Then:
+Edit `.env` if you want to (for example a strong `ADMIN_PASSWORD`). The app container runs on the host network (Docker Engine on Linux; not Docker Desktop), so the certificate automatically covers every address of the server and follows IP changes. Then:
 
 ```bash
 docker compose up -d
@@ -51,7 +51,7 @@ docker compose pull && docker compose up -d
 ### Cloudflare Tunnel (no open ports, free HTTPS)
 
 1. In Cloudflare Zero Trust, create a tunnel and copy its token.
-2. Add a public hostname (for example `board.yourdomain.com`) pointing at `http://app:8443`.
+2. Add a public hostname (for example `board.yourdomain.com`) pointing at `http://localhost:8443`.
 3. In `.env` set `TUNNEL_TOKEN=...`, `HTTPS=off`, `COOKIE_SECURE=1` and `TRUST_PROXY=1`.
 4. `docker compose --profile tunnel up -d`
 
@@ -184,7 +184,7 @@ Sign-in uses a cookie. Two settings matter:
 
 A ready-made Caddy config with automatic certificates is in `deploy/Caddyfile.example`.
 
-**Built-in HTTPS (`HTTPS=auto`, the default for Docker and `install.sh`).** The board creates a private certificate authority and a certificate for this machine's addresses (add more with `EXTRA_ADDRESSES`). The certificate is re-issued automatically when addresses change. Each device downloads the CA once from `https://<server-ip>:8443/ca.crt` (the browser warns once) and installs it; per-device steps are in Option D above. On a Linux desktop: copy it to `/usr/local/share/ca-certificates/inout-board.crt` and run `sudo update-ca-certificates` (Debian/Ubuntu), or `sudo trust anchor inout-board.crt` (Fedora); Chrome and Firefox also keep their own authority lists. Cookies are already `Secure` over built-in HTTPS, so `COOKIE_SECURE` is not needed.
+**Built-in HTTPS (`HTTPS=auto`, the default for Docker and `install.sh`).** The board creates a private certificate authority and a certificate for this machine's addresses (add names it cannot see, such as a public address or DNS name, with `EXTRA_ADDRESSES`). The certificate is re-issued automatically when addresses change. Each device downloads the CA once from `https://<server-ip>:8443/ca.crt` (the browser warns once) and installs it; per-device steps are in Option D above. On a Linux desktop: copy it to `/usr/local/share/ca-certificates/inout-board.crt` and run `sudo update-ca-certificates` (Debian/Ubuntu), or `sudo trust anchor inout-board.crt` (Fedora); Chrome and Firefox also keep their own authority lists. Cookies are already `Secure` over built-in HTTPS, so `COOKIE_SECURE` is not needed.
 
 ---
 
@@ -242,8 +242,8 @@ docker compose start app
 - **Can't sign in:** wrong address scheme with `COOKIE_SECURE=1` (see above), or you were throttled (8 failed tries in 15 minutes per address; wait or restart the app).
 - **Lost the admin password (or `admin` / `admin` does not work):** `admin` / `admin` only applies to a brand-new data folder. An existing install keeps its existing admin account and the password that was generated for it. Reset it with `node scripts/reset-admin.js` (creates or resets `admin` / `admin`, and you are asked for a new password at sign-in; other admins are untouched), `docker compose exec app node scripts/reset-admin.js`, on a systemd install `sudo -u inout DATA_DIR=/var/lib/inout-board node /opt/inout-board/scripts/reset-admin.js` (or `sudo ./deploy/install.sh --reset-admin`), or on Windows `InOutBoard.ps1 -Action ResetAdmin` from an elevated PowerShell. To set a specific password instead: `node scripts/reset-admin.js jordan 'a-long-passphrase'`.
 - **Photos don't show after a restore:** the `uploads/` folder wasn't restored alongside the database.
-- **Port already in use:** change `HOST_PORT` (Docker) or `PORT` (`/etc/inout-board.env` or plain Node).
-- **Certificate warning even after installing the CA, or a name mismatch:** the address you typed is not in the certificate. Add it to `EXTRA_ADDRESSES` (Docker: `.env`, then `docker compose up -d`; systemd: `/etc/inout-board.env`, then `sudo systemctl restart inout-board`).
+- **Port already in use:** change `HOST_PORT` (Docker, since the app uses the host network) or `PORT` (`/etc/inout-board.env` or plain Node).
+- **Certificate warning even after installing the CA, or a name mismatch:** the address you typed is not in the certificate. It is probably a public address or DNS name the server cannot see itself: add it to `EXTRA_ADDRESSES` (Docker: `.env`, then `docker compose up -d`; systemd: `/etc/inout-board.env`, then `sudo systemctl restart inout-board`).
 
 ## Security checklist
 
