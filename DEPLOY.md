@@ -108,15 +108,15 @@ journalctl -u inout-board -f
 
 ## Option D: Windows installer (MSI and Setup EXE)
 
-Download `InOutBoard-<version>-x64.msi` (or `InOutBoard-Setup-<version>-x64.exe`, which wraps the same MSI) from the **Windows installer** workflow run in GitHub Actions (artifact) or from a release. Nothing else needs installing: Node.js and the HTTPS front end (Caddy) are inside the package.
+Download `InOutBoard-<version>-x64.msi` (or `InOutBoard-Setup-<version>-x64.exe`, which wraps the same MSI) from the **Windows installer** workflow run in GitHub Actions (artifact) or from a release. Nothing else needs installing: Node.js is inside the package and the board serves HTTPS itself.
 
 What it sets up:
 
 - Program in `C:\Program Files\IN-OUT Board\`. Settings, data, photos, backups and logs in `C:\ProgramData\InOutBoard\` (administrators and SYSTEM only). Upgrades and uninstalls never delete that folder.
-- Two start-at-boot tasks run as SYSTEM and restart themselves if they stop: the app (listening **only** on `127.0.0.1:3000`) and Caddy (HTTPS on every address of the PC, default port **8443**).
-- Only the HTTPS port is opened in Windows Firewall. The internal port is never exposed.
+- One start-at-boot task runs as SYSTEM and restarts itself if it stops: the board, serving HTTPS on every address of the PC (default port **8443**).
+- Only that one TCP port is opened in Windows Firewall.
 - A nightly backup at 02:15 that keeps 14.
-- Addresses are re-discovered at every start (no hard-coded IP), so a changed IP only needs a restart. The app logs every URL it can be reached on.
+- Addresses are re-discovered at every start (no hard-coded IP), so a changed IP gets a matching certificate within about a minute, with no restart. The app logs every URL it can be reached on.
 
 ```powershell
 # silent install, HTTPS on 443, also serve the public WAN address
@@ -125,11 +125,23 @@ msiexec /i InOutBoard-1.0.0-x64.msi /qn TLSPORT=443 EXTRAADDRESSES=203.0.113.7
 powershell -ExecutionPolicy Bypass -File "C:\Program Files\IN-OUT Board\InOutBoard.ps1" -Action Status
 ```
 
-First admin password: printed once in `C:\ProgramData\InOutBoard\logs\app.log` unless you set `ADMIN_PASSWORD` in `inout-board.env` before the first start.
+First sign-in: user `admin`, password `admin`. The board makes you choose a new password (10 or more characters) before anything else works, so do this straight after installing and before exposing the board beyond your office network.
 
-**Certificates.** HTTPS on an IP address needs a certificate for that exact IP. The installer uses Caddy's private CA, so each client device must trust `C:\ProgramData\InOutBoard\InOutBoard-Local-CA.crt` or the browser warns. For a public WAN IP you can supply a publicly trusted certificate with `TLS_CERT_FILE` / `TLS_KEY_FILE` in `inout-board.env`. Automatic renewal of short-lived public IP certificates is **not** built in yet.
+**HTTPS and certificates.** HTTPS on a bare IP address needs a certificate for that exact IP, so the installer creates a private certificate authority on the PC. **This PC trusts it automatically** (a normal padlock in Chrome and Edge). **Other devices** download it from the board itself: open `https://<this-PC-IP>:8443/ca.crt` (the browser warns once, that is expected), then install it:
+
+Install it once on each device (without it the connection is still encrypted, but the browser warns):
+
+- **Windows:** double-click the file, *Install Certificate*, *Local Machine*, place it in *Trusted Root Certification Authorities*.
+- **macOS:** open the file, add it to *Keychain Access*, then set it to *Always Trust*.
+- **iPhone / iPad:** open the link in Safari and allow the download, install the profile in *Settings*, then turn it on under *Settings, General, About, Certificate Trust Settings*.
+- **Android:** *Settings, Security, Encryption & credentials, Install a certificate, CA certificate*.
+- **Firefox** keeps its own list: set `security.enterprise_roots.enabled` to `true` in `about:config` to use the Windows one.
+
+To use a publicly trusted certificate for a public IP instead, set `TLS_CERT` and `TLS_KEY` (paths to the certificate and key files) in `inout-board.env` and restart. The files are re-read every 6 hours, so a renewed certificate is picked up without a restart. Automatic renewal of short-lived public IP certificates is not built in yet.
 
 **Reaching it from the internet.** Reserve the PC's LAN address in DHCP, forward one public HTTPS port on the router to that port on the PC, and test from outside the office. Anyone who can open the board can still clock anyone in or out, so don't rely on internet exposure until per-person PINs exist.
+
+**Other devices cannot connect, but this PC can?** Run `InOutBoard.ps1 -Action Status` from an *elevated* PowerShell. It checks that the port is listening on all addresses, that the firewall rule exists on every network profile, and that HTTPS answers on each address. If those pass, the cause is outside the PC: router *AP / client isolation* or a guest network, a different subnet or VPN, or a third-party antivirus firewall. Test from the other device with `https://<this-PC-IP>:8443/api/health`; you should see `{"ok":true,...}` after the certificate warning. (Reaching the PC's own IP address from the PC never goes through the firewall, so it proves nothing about other devices.)
 
 Build it yourself: `powershell -File windows\build.ps1 -Version 1.0.0` on Windows with the WiX CLI (see the script header). The files are unsigned, so SmartScreen will warn until they are code-signed.
 
@@ -142,7 +154,7 @@ Sign-in uses a cookie. Two settings matter:
 | Setting | When | Effect |
 |---------|------|--------|
 | `COOKIE_SECURE=1` | The site is served over **https://** | Cookie is only sent over HTTPS |
-| `TRUST_PROXY=1` | A proxy or tunnel sits in front (Caddy, nginx, Cloudflare) | Uses the real visitor IP for login throttling |
+| `TRUST_PROXY=1` | A proxy or tunnel sits in front (Caddy, nginx, Cloudflare); not needed when the board serves HTTPS itself | Uses the real visitor IP for login throttling |
 
 **Gotcha:** with `COOKIE_SECURE=1`, sign-in will silently fail over plain `http://`. If you can't sign in after turning it on, check you are using the https address.
 
@@ -202,7 +214,7 @@ docker compose start app
 - `GET /api/health` returns `{"ok":true}`. Docker uses it for its healthcheck.
 - **"Cross-origin request blocked" when signing in:** you are behind a proxy/tunnel on an old version. Update to the latest code (it uses the browser's `Sec-Fetch-Site` header). If an unusual proxy still strips it, set `TRUST_PROXY=1` and/or `ALLOWED_ORIGINS=https://your.public.address`.
 - **Can't sign in:** wrong address scheme with `COOKIE_SECURE=1` (see above), or you were throttled (8 failed tries in 15 minutes per address; wait or restart the app).
-- **Lost the admin password and have no other admin:** stop the app, run the SQLite statement `DELETE FROM admin_users;` against `inout.sqlite` (the sqlite3 CLI, or any SQLite tool), then start with a new `ADMIN_PASSWORD`. A fresh admin is created on start.
+- **Lost the admin password (or `admin` / `admin` does not work):** `admin` / `admin` only applies to a brand-new data folder. An existing install keeps its existing admin account and the password that was generated for it. Reset it with `node scripts/reset-admin.js` (creates or resets `admin` / `admin`, and you are asked for a new password at sign-in; other admins are untouched), `docker compose exec app node scripts/reset-admin.js`, or on Windows `InOutBoard.ps1 -Action ResetAdmin` from an elevated PowerShell. To set a specific password instead: `node scripts/reset-admin.js jordan 'a-long-passphrase'`.
 - **Photos don't show after a restore:** the `uploads/` folder wasn't restored alongside the database.
 - **Port already in use:** change `HOST_PORT` (Docker) or `PORT` (plain Node).
 

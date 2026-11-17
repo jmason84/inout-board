@@ -4,12 +4,13 @@
   file into $(StageDir) first, so this file never lists files by hand.
 
   Public properties (msiexec /i InOutBoard.msi TLSPORT=443 EXTRAADDRESSES=203.0.113.7 /qn):
-    TLSPORT         HTTPS port people use. Default 8443. Used on first install only;
+    TLSPORT         HTTPS port the board serves on. Default 8443. Used on first install only;
                     afterwards edit C:\ProgramData\InOutBoard\inout-board.env
     EXTRAADDRESSES  Extra addresses to serve HTTPS on (e.g. the public WAN address)
 
   Upgrades keep settings, data, uploads and backups (all under ProgramData).
   Uninstall removes the program, scheduled tasks and firewall rule, never the data.
+  To also remove data: msiexec /x {ProductCode} PURGEDATA=1 /qn
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package Name="IN/OUT Board"
@@ -20,10 +21,11 @@
            Compressed="yes">
 
     <MajorUpgrade DowngradeErrorMessage="A newer version of IN/OUT Board is already installed." />
-    <MediaTemplate EmbedCab="yes" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
     <Property Id="TLSPORT" Value="8443" Secure="yes" />
     <Property Id="EXTRAADDRESSES" Secure="yes" />
+    <Property Id="PURGEDATA" Secure="yes" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="IN-OUT Board" />
@@ -40,16 +42,31 @@
     <CustomAction Id="RemoveBoard" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="ignore"
       ExeCommand="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]InOutBoard.ps1&quot; -Action Remove" />
 
+    <CustomAction Id="PurgeBoard" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="check"
+      ExeCommand="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]InOutBoard.ps1&quot; -Action Purge" />
+
     <CustomAction Id="ConfigureBoard" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="check"
       ExeCommand="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]InOutBoard.ps1&quot; -Action Install -TlsPort [TLSPORT] -ExtraAddresses &quot;[EXTRAADDRESSES]&quot;" />
 
+    <!-- On a fresh install (not an upgrade), reset admin to admin/admin with forced password change.
+         This ensures that reinstalling over leftover data always gives a known first-login experience. -->
+    <CustomAction Id="ResetAdminOnInstall" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="ignore"
+      ExeCommand="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]InOutBoard.ps1&quot; -Action ResetAdmin" />
+
     <InstallExecuteSequence>
-      <!-- Uninstall, and the removal of the old version during an upgrade: stop first so no file is locked. -->
-      <Custom Action="StopBoard" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot;" />
+      <!-- Stop on maintenance/repair as well as uninstall so node.exe is not locked
+           while InstallFiles replaces it. ConfigureBoard starts it again. -->
+      <Custom Action="StopBoard" Before="RemoveFiles" Condition="Installed OR REMOVE=&quot;ALL&quot;" />
       <!-- Real uninstall only (not an upgrade): drop the tasks and firewall rule. -->
       <Custom Action="RemoveBoard" After="StopBoard" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <!-- Optional: also wipe application data when PURGEDATA=1. -->
+      <Custom Action="PurgeBoard" After="RemoveBoard" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE AND PURGEDATA=&quot;1&quot;" />
       <!-- Install and upgrade: set up folders, settings, tasks, firewall, start. -->
       <Custom Action="ConfigureBoard" After="InstallFiles" Condition="NOT REMOVE" />
+      <!-- Fresh install only (not upgrade): reset admin to admin/admin so reinstalling over old data
+           always gives the documented first-login experience. Return="ignore" so a missing DB (truly
+           fresh) does not fail the install. -->
+      <Custom Action="ResetAdminOnInstall" After="ConfigureBoard" Condition="NOT Installed AND NOT REMOVE AND NOT WIX_UPGRADE_DETECTED" />
     </InstallExecuteSequence>
   </Package>
 </Wix>

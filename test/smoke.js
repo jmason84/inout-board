@@ -9,6 +9,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const assert = require('node:assert/strict');
+const http = require('node:http');
 
 const PORT = 3900 + Math.floor(Math.random() * 90);
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -201,11 +202,41 @@ async function t(name, fn) {
     for (const l of ['table', 'list', 'cards', 'tiles', 'board']) assert.equal((await call('PUT', '/api/admin/settings', { kiosk_layout: l })).status, 200, l);
   });
 
+  await t('settings: theme (light/dark/system) persists and appears in directory', async () => {
+    for (const v of ['light', 'dark', 'system']) {
+      assert.equal((await call('PUT', '/api/admin/settings', { theme: v })).status, 200, `set theme ${v}`);
+    }
+    assert.equal((await call('PUT', '/api/admin/settings', { theme: 'neon' })).status, 400, 'reject invalid theme');
+    await call('PUT', '/api/admin/settings', { theme: 'dark' });
+    const d = (await call('GET', '/api/directory', undefined, { jar: false })).data;
+    assert.equal(d.theme, 'dark', 'directory includes theme');
+    await call('PUT', '/api/admin/settings', { theme: 'system' }); // reset
+  });
+
+  await t('update-check endpoint returns JSON (may not reach GitHub)', async () => {
+    const r = await call('GET', '/api/admin/update-check');
+    assert.equal(r.status, 200);
+    assert.ok('current_version' in r.data || 'error' in r.data, 'response has version or error');
+    // unauthenticated should be rejected
+    assert.equal((await call('GET', '/api/admin/update-check', undefined, { jar: false })).status, 401);
+  });
+
   await t('static pages + security headers; path traversal blocked', async () => {
     for (const p of ['/', '/admin', '/me']) assert.equal((await call('GET', p, undefined, { jar: false })).status, 200, p);
     const r = await call('GET', '/', undefined, { jar: false });
     assert.match(r.headers.get('content-security-policy'), /default-src 'self'/);
     assert.notEqual((await call('GET', '/photos/../data/inout.sqlite', undefined, { jar: false })).status, 200);
+  });
+
+  await t('malformed Host is rejected without crashing the server', async () => {
+    const status = await new Promise((resolve, reject) => {
+      const req = http.get(BASE + '/api/health', { headers: { Host: '[' } }, (res) => {
+        res.resume(); res.on('end', () => resolve(res.statusCode));
+      });
+      req.on('error', reject);
+    });
+    assert.equal(status, 400);
+    assert.equal((await call('GET', '/api/health')).data.ok, true);
   });
 
   await t('CSV export: admin only, UTF-8 BOM, every person with their settings', async () => {
@@ -334,6 +365,177 @@ async function t(name, fn) {
     assert.match(r.stdout, new RegExp(`listening on http://127.0.0.1:${PORT + 1000}`));
     assert.ok(fs.existsSync(path.join(d2, 'inout.sqlite')), 'DATA_DIR from file was used');
     fs.rmSync(d2, { recursive: true, force: true });
+  });
+
+  await t('default admin/admin works once, then a new password is forced before anything else', async () => {
+    const { spawn } = require('node:child_process');
+    const d3 = fs.mkdtempSync(path.join(os.tmpdir(), 'inout-default-'));
+    const port3 = PORT + 2000;
+    const srv = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', path.join(__dirname, '..', 'server.js')], {
+      env: { ...process.env, PORT: String(port3), HOST: '127.0.0.1', DATA_DIR: d3, ADMIN_USER: 'admin', ADMIN_PASSWORD: 'admin' },
+      stdio: 'ignore',
+    });
+    try {
+      const base = `http://127.0.0.1:${port3}`;
+      for (let i = 0; i < 60; i++) { try { if ((await fetch(base + '/api/health')).ok) break; } catch { /* starting */ } await sleep(100); }
+      let jar = '';
+      const api = async (method, url, body) => {
+        const r = await fetch(base + url, { method, headers: { 'Content-Type': 'application/json', ...(jar ? { Cookie: jar } : {}) }, body: body ? JSON.stringify(body) : undefined });
+        const set = r.headers.get('set-cookie'); if (set) jar = set.split(';')[0];
+        let data; try { data = await r.json(); } catch { data = {}; }
+        return { status: r.status, data };
+      };
+      const login = await api('POST', '/api/auth/login', { username: 'admin', password: 'admin' });
+      assert.equal(login.status, 200);
+      assert.equal(login.data.must_change, true);
+      assert.equal((await api('GET', '/api/auth/me')).data.must_change, true);
+      // everything except the password change is refused, and says why
+      for (const u of ['/api/tenants', '/api/people', '/api/admin/overview', '/api/admin/settings', '/api/admin/users']) {
+        const r = await api('GET', u);
+        assert.equal(r.status, 403, u); assert.equal(r.data.must_change, true, u);
+      }
+      assert.equal((await api('POST', '/api/auth/password', { next: 'short' })).status, 400);
+      assert.equal((await api('POST', '/api/auth/password', { next: 'admin' })).status, 400);
+      assert.equal((await api('POST', '/api/auth/password', { next: 'a-much-better-passphrase' })).status, 200);
+      assert.equal((await api('GET', '/api/auth/me')).data.must_change, false);
+      assert.equal((await api('GET', '/api/admin/overview')).status, 200);
+      // the old default no longer signs in; the new password does
+      jar = '';
+      assert.equal((await api('POST', '/api/auth/login', { username: 'admin', password: 'admin' })).status, 401);
+      const again = await api('POST', '/api/auth/login', { username: 'admin', password: 'a-much-better-passphrase' });
+      assert.equal(again.status, 200); assert.equal(again.data.must_change, false);
+    } finally {
+      srv.kill();
+      await sleep(200);
+      fs.rmSync(d3, { recursive: true, force: true });
+    }
+  });
+
+  await t('a strong ADMIN_PASSWORD is not forced to change', async () => {
+    // the main test server was started with a non-default password
+    const me = await call('POST', '/api/auth/login', { username: 'tester', password: PASS });
+    assert.equal(me.status, 200);
+    assert.equal(me.data.must_change, false);
+    cookie = me.set.split(';')[0];
+    assert.equal((await call('GET', '/api/admin/overview')).status, 200);
+  });
+
+  await t('reset-admin recovers a locked-out install (admin/admin, forced change) and can set a chosen password', async () => {
+    const { spawn, execFileSync } = require('node:child_process');
+    const d4 = fs.mkdtempSync(path.join(os.tmpdir(), 'inout-reset-'));
+    const port4 = PORT + 3000;
+    const start = () => spawn(process.execPath, ['--disable-warning=ExperimentalWarning', path.join(__dirname, '..', 'server.js')], {
+      env: { ...process.env, PORT: String(port4), HOST: '127.0.0.1', DATA_DIR: d4, ADMIN_USER: 'owner', ADMIN_PASSWORD: 'unknown-long-original-pass' },
+      stdio: 'ignore',
+    });
+    const base = `http://127.0.0.1:${port4}`;
+    const up = async () => { for (let i = 0; i < 60; i++) { try { if ((await fetch(base + '/api/health')).ok) return; } catch { /* starting */ } await sleep(100); } };
+    const login = async (u, p) => {
+      const r = await fetch(base + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: u, password: p }) });
+      let data = {}; try { data = await r.json(); } catch { /* none */ }
+      return { status: r.status, data };
+    };
+    const reset = (...args) => execFileSync(process.execPath, ['--disable-warning=ExperimentalWarning', path.join(__dirname, '..', 'scripts', 'reset-admin.js'), ...args], { env: { ...process.env, DATA_DIR: d4 }, encoding: 'utf8' });
+    let srv = start();
+    try {
+      await up();
+      assert.equal((await login('admin', 'admin')).status, 401, 'no admin/admin yet');
+      srv.kill(); await sleep(300);
+      assert.match(reset(), /Created admin "admin"/);
+      srv = start(); await up();
+      const a = await login('admin', 'admin');
+      assert.equal(a.status, 200); assert.equal(a.data.must_change, true);
+      assert.equal((await login('owner', 'unknown-long-original-pass')).status, 200, 'other admins are untouched');
+      srv.kill(); await sleep(300);
+      assert.match(reset('owner', 'a-brand-new-passphrase'), /Reset the password for admin "owner"/);
+      assert.throws(() => reset('owner', 'short'), /at least 10/);
+      srv = start(); await up();
+      assert.equal((await login('owner', 'unknown-long-original-pass')).status, 401);
+      const o = await login('owner', 'a-brand-new-passphrase');
+      assert.equal(o.status, 200); assert.equal(o.data.must_change, false);
+    } finally {
+      srv.kill(); await sleep(200);
+      fs.rmSync(d4, { recursive: true, force: true });
+    }
+  });
+
+  await t('built-in HTTPS: private CA signs a certificate that covers the addresses, is reused, and re-issued when they change', async () => {
+    const crypto = require('node:crypto');
+    const tlscert = require('../scripts/tlscert');
+    const d5 = fs.mkdtempSync(path.join(os.tmpdir(), 'inout-tls-'));
+    try {
+      const a = tlscert.ensure({ dir: d5, ips: ['127.0.0.1', '192.168.6.235'], dns: ['localhost', 'front-desk'] });
+      assert.equal(a.reissued, true);
+      const ca = new crypto.X509Certificate(a.caPem);
+      const leaf = new crypto.X509Certificate(a.cert);
+      assert.ok(leaf.verify(ca.publicKey), 'server certificate is signed by the CA');
+      assert.equal(leaf.issuer, ca.subject);
+      assert.ok(leaf.checkIP('192.168.6.235') && leaf.checkIP('127.0.0.1'), 'IP SANs');
+      assert.ok(leaf.checkHost('localhost') && leaf.checkHost('front-desk'), 'DNS SANs');
+      assert.ok(!leaf.ca && ca.ca, 'leaf is not a CA, root is');
+      assert.ok(new Date(leaf.validTo) > new Date(Date.now() + 300 * 86400000), 'valid for most of a year');
+      assert.ok(!a.caPem.includes('PRIVATE'), 'CA certificate text carries no key');
+      const b = tlscert.ensure({ dir: d5, ips: ['127.0.0.1', '192.168.6.235'], dns: ['localhost', 'front-desk'] });
+      assert.equal(b.reissued, false, 'unchanged addresses reuse the certificate');
+      const c = tlscert.ensure({ dir: d5, ips: ['10.1.2.3'], dns: ['localhost'] });
+      assert.equal(c.reissued, true, 'new address re-issues');
+      assert.equal(c.caPem, a.caPem, 'same CA, so devices keep trusting it');
+      assert.ok(new crypto.X509Certificate(c.cert).checkIP('10.1.2.3'));
+    } finally { fs.rmSync(d5, { recursive: true, force: true }); }
+  });
+
+  await t('built-in HTTPS adopts the CA of an older Caddy-based install', async () => {
+    const crypto = require('node:crypto');
+    const tlscert = require('../scripts/tlscert');
+    const legacy = fs.mkdtempSync(path.join(os.tmpdir(), 'inout-legacy-'));
+    const d6 = fs.mkdtempSync(path.join(os.tmpdir(), 'inout-tls2-'));
+    try {
+      const old = tlscert.createCa('Caddy Local Authority - 2026 ECC Root');
+      fs.writeFileSync(path.join(legacy, 'root.crt'), old.certPem);
+      fs.writeFileSync(path.join(legacy, 'root.key'), old.keyPem);
+      const r = tlscert.ensure({ dir: d6, ips: ['127.0.0.1'], dns: ['localhost'], legacyDir: legacy });
+      assert.equal(r.caPem, old.certPem, 'same CA certificate');
+      assert.ok(new crypto.X509Certificate(r.cert).verify(new crypto.X509Certificate(old.certPem).publicKey));
+    } finally { fs.rmSync(legacy, { recursive: true, force: true }); fs.rmSync(d6, { recursive: true, force: true }); }
+  });
+
+  await t('HTTPS=auto serves the app over TLS, trusts only its CA, serves /ca.crt, gzips assets, sets Secure cookies', async () => {
+    const { spawn } = require('node:child_process');
+    const https = require('node:https');
+    const zlib = require('node:zlib');
+    const d7 = fs.mkdtempSync(path.join(os.tmpdir(), 'inout-https-'));
+    const p7 = PORT + 2000;
+    const srv = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', path.join(__dirname, '..', 'server.js')], {
+      env: { ...process.env, PORT: String(p7), HOST: '127.0.0.1', DATA_DIR: d7, HTTPS: 'auto', ADMIN_USER: 'tester', ADMIN_PASSWORD: PASS },
+      stdio: 'ignore',
+    });
+    const get = (urlPath, { ca, headers = {}, method = 'GET', body } = {}) => new Promise((resolve, reject) => {
+      const req = https.request({ host: '127.0.0.1', port: p7, path: urlPath, method, headers, ca, servername: 'localhost' }, (res) => {
+        const chunks = []; res.on('data', (c) => chunks.push(c)); res.on('end', () => resolve({ res, body: Buffer.concat(chunks) }));
+      });
+      req.on('error', reject); if (body) req.write(body); req.end();
+    });
+    try {
+      const caFile = path.join(d7, 'tls', 'ca.crt');
+      for (let i = 0; i < 60 && !fs.existsSync(path.join(d7, 'tls', 'server.crt')); i++) await sleep(100);
+      await sleep(300);
+      const ca = fs.readFileSync(caFile);
+      const h = await get('/api/health', { ca });
+      assert.equal(h.res.statusCode, 200);
+      await assert.rejects(get('/api/health', {}), /self.signed|unable to verify|certificate/i, 'untrusted without the CA');
+      const dl = await get('/ca.crt', { ca });
+      assert.equal(dl.res.headers['content-type'], 'application/x-x509-ca-cert');
+      assert.equal(dl.body.toString(), ca.toString());
+      assert.ok(!dl.body.toString().includes('PRIVATE'));
+      const js = await get('/app.js', { ca, headers: { 'Accept-Encoding': 'gzip' } });
+      assert.equal(js.res.headers['content-encoding'], 'gzip');
+      assert.equal(zlib.gunzipSync(js.body).toString(), fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8'));
+      const plain = await get('/app.js', { ca });
+      assert.equal(plain.res.headers['content-encoding'], undefined);
+      const login = await get('/api/auth/login', { ca, method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'tester', password: PASS }) });
+      assert.equal(login.res.statusCode, 200);
+      assert.match(String(login.res.headers['set-cookie']), /; Secure/);
+    } finally { srv.kill(); await sleep(200); fs.rmSync(d7, { recursive: true, force: true }); }
   });
 
   console.log(`\n${passed} checks passed`);

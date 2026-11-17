@@ -24,6 +24,18 @@
     --accent: #58a6ff; --accent-bg: #10243d; --focus: #79c0ff; --none-bg: #262c36; --shadow: none;
   }
 }
+/* Explicit overrides: data-theme on <html> takes precedence over the media query. */
+html[data-theme="light"] {
+  --bg: #f4f5f7; --card: #ffffff; --border: #d0d7de; --text: #1f2328; --muted: #57606a;
+  --in: #1a7f37; --in-bg: #dafbe1; --out: #cf222e; --out-bg: #ffebe9;
+  --accent: #0969da; --accent-bg: #ddf4ff; --focus: #0550ae; --none-bg: #eaeef2;
+  --shadow: 0 1px 3px rgba(31, 35, 40, .08);
+}
+html[data-theme="dark"] {
+  --bg: #0d1117; --card: #161b22; --border: #3d444d; --text: #e6edf3; --muted: #9da7b3;
+  --in: #3fb950; --in-bg: #12261a; --out: #ff7b72; --out-bg: #3a1618;
+  --accent: #58a6ff; --accent-bg: #10243d; --focus: #79c0ff; --none-bg: #262c36; --shadow: none;
+}
 
 *, *::before, *::after { box-sizing: border-box; }
 html { font-size: 100%; -webkit-text-size-adjust: 100%; }
@@ -285,3 +297,7 @@ td.hint { text-align: center; padding: 1.5rem; }
 }
 
 .modal p { white-space: pre-line; }
+
+/* Update notification banner */
+.update-banner { background: var(--accent-bg); border-left: 4px solid var(--accent); padding: .9rem 1.2rem; margin-bottom: 1rem; }
+.update-banner a { color: var(--accent); font-weight: 600; }

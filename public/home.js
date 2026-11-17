@@ -70,6 +70,9 @@ async function load({ keepFocus = false } = {}) {
   mode = data.mode;
   tenants = data.tenants;
   if (!layoutLocked && VALID.includes(data.layout)) layout = data.layout; // admin's default, until the visitor picks one
+  if (window.IOPrefs && data.theme) {
+    IOPrefs.applyDefaultTheme(data.theme);
+  }
   loaded = true;
   const prevChips = $('#tenantChips').childElementCount;
   if (prevChips !== tenants.length + 1) paintChips();

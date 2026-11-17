@@ -145,6 +145,7 @@ let boardTimer = null;
 function showLogin(msg) {
   setTimeout(() => { const u = $('#loginUser'); if (u && !$('#adminGate').hidden) u.focus(); }, 0);
   $('#adminGate').hidden = false;
+  $('#pwGate').hidden = true;
   $('#adminPanel').hidden = true;
   $('#acct').hidden = true;
   clearInterval(boardTimer);
@@ -152,21 +153,52 @@ function showLogin(msg) {
   err.hidden = !msg; err.textContent = msg || '';
 }
 
+// The account is still on its initial password: nothing else is allowed until it is changed.
+function showMustChange() {
+  clearInterval(boardTimer);
+  $('#adminGate').hidden = true;
+  $('#adminPanel').hidden = true;
+  $('#pwGate').hidden = false;
+  $('#acct').hidden = false;
+  setTimeout(() => { const f = $('#pwNew'); if (f) f.focus(); }, 0);
+}
+
 async function adminFetch(path, opts = {}) {
   const res = await api(path, opts);
   if (res.status === 401) { showLogin('Your session expired. Please sign in again.'); throw new Error('unauthorized'); }
+  if (res.status === 403) {
+    const body = await res.clone().json().catch(() => ({}));
+    if (body && body.must_change) { showMustChange(); throw new Error('must change password'); }
+  }
   return res;
 }
 
 async function loadAdmin() {
   const me = await api('/api/auth/me');
   if (!me.ok) return showLogin();
-  $('#acctName').textContent = (await json(me)).username;
+  const who = await json(me);
+  $('#acctName').textContent = who.username;
   $('#acct').hidden = false;
+  if (who.must_change) return showMustChange();
   $('#adminGate').hidden = true;
+  $('#pwGate').hidden = true;
   $('#adminPanel').hidden = false;
   showAdminPage(currentAdminPage);
 }
+
+$('#pwForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const err = $('#pwError');
+  const a = $('#pwNew').value, b = $('#pwNew2').value;
+  const fail = (m) => { err.textContent = m; err.hidden = false; };
+  if (a.length < 10) return fail('Use at least 10 characters.');
+  if (a !== b) return fail('The two passwords do not match.');
+  const res = await api('/api/auth/password', { method: 'POST', body: JSON.stringify({ next: a }) });
+  if (!res.ok) return fail((await json(res)).error || 'Could not change the password');
+  $('#pwNew').value = ''; $('#pwNew2').value = ''; err.hidden = true;
+  toast('Password changed');
+  loadAdmin();
+});
 
 $('#loginForm').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -221,6 +253,16 @@ async function refreshTenantsCache() {
 function dayStart() { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); }
 
 async function loadOverview() {
+  // Check for updates (non-blocking)
+  adminFetch('/api/admin/update-check').then((r) => r.ok ? r.json() : null).then((u) => {
+    const banner = $('#updateBanner');
+    if (!u || !u.update_available) { banner.hidden = true; return; }
+    banner.hidden = false;
+    banner.innerHTML = `<strong>Update available:</strong> v${escapeHtml(u.latest_version)}${u.release_name ? ' — ' + escapeHtml(u.release_name) : ''}.`
+      + ` You're running v${escapeHtml(u.current_version)}.`
+      + (u.release_url ? ` <a href="${escapeHtml(u.release_url)}" target="_blank" rel="noopener">View release notes ↗</a>` : '');
+  }).catch(() => {}); // silently ignore
+
   const d = await json(await adminFetch(`/api/admin/overview?day_start=${dayStart()}`));
   const t = d.totals;
   $('#overviewStats').innerHTML = [
@@ -809,6 +851,12 @@ const MODES = [
   { id: 'search', label: 'Search only', desc: 'Visitors must type a name or company to see anyone. Best for privacy on a shared tablet.' },
 ];
 
+const THEMES = [
+  { id: 'light', label: 'Light', desc: 'Always use the light colour scheme.' },
+  { id: 'dark', label: 'Dark', desc: 'Always use the dark colour scheme — ideal for wall-mounted tablets.' },
+  { id: 'system', label: 'Follow device', desc: 'Matches the operating system light/dark setting.' },
+];
+
 async function loadSettings() {
   const st = await json(await adminFetch('/api/admin/settings'));
   const radio = (name, items, value) => items.map((o) => `
@@ -819,14 +867,21 @@ async function loadSettings() {
     </label>`).join('');
   $('#layoutOpts').setAttribute('role', 'radiogroup'); $('#layoutOpts').setAttribute('aria-label', 'Default layout');
   $('#modeOpts').setAttribute('role', 'radiogroup'); $('#modeOpts').setAttribute('aria-label', 'What the board shows');
+  $('#themeOpts').setAttribute('role', 'radiogroup'); $('#themeOpts').setAttribute('aria-label', 'Theme');
   $('#layoutOpts').innerHTML = radio('kiosk_layout', IO.LAYOUTS, st.kiosk_layout);
   $('#modeOpts').innerHTML = radio('kiosk_mode', MODES, st.kiosk_mode);
+  // Theme: show server default, but apply the localStorage override for this browser.
+  if (window.IOPrefs) IOPrefs.applyDefaultTheme(st.theme);
+  const browserTheme = window.IOPrefs ? IOPrefs.getTheme() : st.theme;
+  $('#themeOpts').innerHTML = radio('theme', THEMES, browserTheme);
 }
 
 $('#admin-settings').addEventListener('change', async (e) => {
   const input = e.target.closest('input[type=radio]');
   if (!input) return;
   const res = await adminFetch('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ [input.name]: input.value }) });
+  // Only persist the local choice after the server accepts the setting.
+  if (res.ok && input.name === 'theme' && window.IOPrefs) IOPrefs.setTheme(input.value);
   if (res.ok) { toast('Saved'); await loadSettings(); const again = document.querySelector(`input[name="${input.name}"][value="${input.value}"]`); if (again) again.focus(); } else toast((await json(res)).error || 'Could not save', true);
 });
 

@@ -12,6 +12,9 @@
  */
 
 const http = require('node:http');
+const https = require('node:https');
+const zlib = require('node:zlib');
+const os = require('node:os');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -35,12 +38,22 @@ if (process.env.INOUT_ENV_FILE) {
   }
 }
 const netinfo = require('./scripts/netinfo');
+const tlscert = require('./scripts/tlscert');
 
+const PKG_VERSION = require('./package.json').version;
 const PORT = Number(process.env.PORT || 3000);
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const TRUST_PROXY = process.env.TRUST_PROXY === '1';
 const COOKIE_SECURE = process.env.COOKIE_SECURE === '1';
 const HOST = process.env.HOST || '0.0.0.0';
+// HTTPS served by the board itself (no reverse proxy needed):
+//   TLS_CERT + TLS_KEY  -> use your own certificate files (re-read every 6 h)
+//   HTTPS=auto          -> private CA + certificate for this machine's addresses,
+//                          kept in TLS_DIR (default DATA_DIR/tls), CA served at /ca.crt
+const TLS_CERT = process.env.TLS_CERT || '';
+const TLS_KEY = process.env.TLS_KEY || '';
+const TLS_AUTO = !(TLS_CERT && TLS_KEY) && String(process.env.HTTPS || '').toLowerCase() === 'auto';
+const USES_TLS = Boolean(TLS_CERT && TLS_KEY) || TLS_AUTO;
 
 const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(__dirname, 'data');
 const DB_PATH = path.join(DATA_DIR, 'inout.sqlite');
@@ -121,6 +134,7 @@ function addColumn(table, col, def) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all();
   if (!cols.some((c) => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
 }
+addColumn('admin_users', 'must_change', 'INTEGER NOT NULL DEFAULT 0');
 addColumn('people', 'email', "TEXT NOT NULL DEFAULT ''");
 addColumn('people', 'title', "TEXT NOT NULL DEFAULT ''");
 addColumn('people', 'bio', "TEXT NOT NULL DEFAULT ''");
@@ -254,9 +268,13 @@ function bootstrapAdmin() {
   let password = process.env.ADMIN_PASSWORD;
   let generated = false;
   if (!password) { password = crypto.randomBytes(12).toString('base64url'); generated = true; }
-  db.prepare('INSERT INTO admin_users (username, password_hash, created_at) VALUES (?, ?, ?)')
-    .run(username, hashPassword(password), Date.now());
+  // The well-known default ("admin") is accepted for the very first sign-in only:
+  // the account is flagged so nothing else works until a new password is chosen.
+  const mustChange = password === 'admin' || process.env.ADMIN_MUST_CHANGE === '1' ? 1 : 0;
+  db.prepare('INSERT INTO admin_users (username, password_hash, created_at, must_change) VALUES (?, ?, ?, ?)')
+    .run(username, hashPassword(password), Date.now(), mustChange);
   console.log(`Created first admin account "${username}".`);
+  if (mustChange) console.log('  Sign in with the initial password; you will be asked to choose a new one before anything else.');
   if (generated) console.log(`  Generated password (shown once, change it after login): ${password}`);
 }
 bootstrapAdmin();
@@ -279,7 +297,7 @@ function clientIp(req) {
 }
 
 function isSecureReq(req) {
-  return COOKIE_SECURE || (TRUST_PROXY && req.headers['x-forwarded-proto'] === 'https');
+  return COOKIE_SECURE || Boolean(req.socket.encrypted) || (TRUST_PROXY && req.headers['x-forwarded-proto'] === 'https');
 }
 
 function sessionCookie(req, value, maxAgeSec) {
@@ -291,7 +309,7 @@ function currentUser(req) {
   const sid = parseCookies(req).sid;
   if (!sid) return null;
   const row = db.prepare(`
-    SELECT u.id, u.username, s.expires_at
+    SELECT u.id, u.username, u.must_change, s.expires_at
     FROM sessions s JOIN admin_users u ON u.id = s.user_id
     WHERE s.token_hash = ?
   `).get(sha256(sid));
@@ -300,13 +318,17 @@ function currentUser(req) {
     db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(sha256(sid));
     return null;
   }
-  return { id: row.id, username: row.username };
+  return { id: row.id, username: row.username, must_change: !!row.must_change };
 }
 
 function requireAdmin(res, req) {
   const user = currentUser(req);
   if (!user) {
     sendJSON(res, 401, { error: 'Login required' });
+    return null;
+  }
+  if (user.must_change && String(req.url || '').split('?')[0] !== '/api/auth/password') {
+    sendJSON(res, 403, { error: 'You must choose a new password before continuing', must_change: true });
     return null;
   }
   req.user = user;
@@ -351,7 +373,10 @@ function sameOrigin(req) {
   return hosts.includes(originHost) || extra.includes(originHost);
 }
 
-function serveStatic(res, urlPath) {
+const GZIP_EXT = new Set(['.html', '.js', '.css', '.svg', '.json', '.txt']);
+const gzipCache = new Map();
+
+function serveStatic(res, urlPath, req) {
   // Only allow serving from public/ and assets/.
   let filePath = null;
   if (urlPath === '/' || urlPath === '') {
@@ -372,21 +397,44 @@ function serveStatic(res, urlPath) {
     return res.end('Forbidden');
   }
 
-  fs.readFile(resolved, (err, data) => {
-    if (err) {
+  fs.stat(resolved, (serr, st) => {
+    if (serr || !st.isFile()) {
       res.writeHead(404);
       return res.end('Not found');
     }
-    const ext = path.extname(resolved).toLowerCase();
-    res.writeHead(200, {
-      'Content-Type': MIME[ext] || 'application/octet-stream',
-      'X-Content-Type-Options': 'nosniff',
-      'X-Frame-Options': 'DENY',
-      'Content-Security-Policy': "default-src 'self'; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
-      'Referrer-Policy': 'same-origin',
-      'Cache-Control': ext === '.html' ? 'no-store' : 'no-cache',
+    fs.readFile(resolved, (err, data) => {
+      if (err) {
+        res.writeHead(404);
+        return res.end('Not found');
+      }
+      const ext = path.extname(resolved).toLowerCase();
+      const headers = {
+        'Content-Type': MIME[ext] || 'application/octet-stream',
+        'X-Content-Type-Options': 'nosniff',
+        'X-Frame-Options': 'DENY',
+        'Content-Security-Policy': "default-src 'self'; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+        'Referrer-Policy': 'same-origin',
+        'Cache-Control': ext === '.html' ? 'no-store' : 'no-cache',
+      };
+      if (GZIP_EXT.has(ext) && data.length > 1024) {
+        headers.Vary = 'Accept-Encoding';
+        if (/\bgzip\b/.test(String((req && req.headers['accept-encoding']) || ''))) {
+          const key = `${resolved}:${st.mtimeMs}:${st.size}`;
+          let gz = gzipCache.get(key);
+          if (!gz) {
+            gz = zlib.gzipSync(data, { level: 9 });
+            if (gzipCache.size > 64) gzipCache.clear();
+            gzipCache.set(key, gz);
+          }
+          headers['Content-Encoding'] = 'gzip';
+          headers['Content-Length'] = gz.length;
+          res.writeHead(200, headers);
+          return res.end(gz);
+        }
+      }
+      res.writeHead(200, headers);
+      res.end(data);
     });
-    res.end(data);
   });
 }
 
@@ -822,13 +870,21 @@ function photosForTenant(tenantId) {
 }
 
 // ---------------------------------------------------------------------------
+// GitHub update check (cached, rate-limit safe)
+// ---------------------------------------------------------------------------
+
+const { createUpdateChecker } = require('./scripts/update-check');
+const checkForUpdate = createUpdateChecker({ version: PKG_VERSION });
+
+// ---------------------------------------------------------------------------
 // Settings (admin-controlled, whitelisted)
 // ---------------------------------------------------------------------------
 
-const SETTING_DEFAULTS = { kiosk_layout: 'table', kiosk_mode: 'browse' };
+const SETTING_DEFAULTS = { kiosk_layout: 'table', kiosk_mode: 'browse', theme: 'system' };
 const SETTING_OPTIONS = {
   kiosk_layout: ['table', 'list', 'cards', 'tiles', 'board'],
   kiosk_mode: ['search', 'browse'],
+  theme: ['light', 'dark', 'system'],
 };
 
 function getSettings() {
@@ -997,8 +1053,10 @@ function importPeople(csvText, { dryRun, defaultTenantId }) {
 // Router
 // ---------------------------------------------------------------------------
 
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+async function handleRequest(req, res) {
+  let url;
+  try { url = new URL(req.url, `http://${req.headers.host || 'localhost'}`); }
+  catch { return sendJSON(res, 400, { error: 'Invalid request URL or Host' }); }
   // Normalise /api/<resource>/<numeric id> to /api/<resource>/:id for routing.
   const idMatch = url.pathname.match(/^\/api\/(tenants|people|events|admin\/users)\/(\d+)$/);
   const subMatch = url.pathname.match(/^\/api\/(people|tenants)\/(\d+)\/(photo|access|logo)$/);
@@ -1014,8 +1072,16 @@ const server = http.createServer(async (req, res) => {
       return servePhoto(res, url.pathname.slice('/photos/'.length));
     }
     if (req.method === 'GET' && !url.pathname.startsWith('/api/')) {
-      if (url.pathname === '/me' || url.pathname === '/me/') return serveStatic(res, '/me.html');
-      return serveStatic(res, url.pathname);
+      if (url.pathname === '/ca.crt' && tlsState) {
+        res.writeHead(200, {
+          'Content-Type': 'application/x-x509-ca-cert',
+          'Content-Disposition': 'attachment; filename="InOutBoard-Local-CA.crt"',
+          'Cache-Control': 'no-store',
+        });
+        return res.end(tlsState.caPem);
+      }
+      if (url.pathname === '/me' || url.pathname === '/me/') return serveStatic(res, '/me.html', req);
+      return serveStatic(res, url.pathname, req);
     }
 
     // ---- CSRF guard for state-changing requests -----------------------------
@@ -1040,7 +1106,7 @@ const server = http.createServer(async (req, res) => {
         .run(sha256(token), user.id, now, now + SESSION_TTL_MS);
       db.prepare('UPDATE admin_users SET last_login = ? WHERE id = ?').run(now, user.id);
       res.setHeader('Set-Cookie', sessionCookie(req, token, SESSION_TTL_MS / 1000));
-      return sendJSON(res, 200, { username: user.username });
+      return sendJSON(res, 200, { username: user.username, must_change: !!db.prepare('SELECT must_change FROM admin_users WHERE id = ?').get(user.id).must_change });
     }
 
     if (route === 'POST /api/auth/logout') {
@@ -1053,19 +1119,22 @@ const server = http.createServer(async (req, res) => {
     if (route === 'GET /api/auth/me') {
       const user = currentUser(req);
       if (!user) return sendJSON(res, 401, { error: 'Login required' });
-      return sendJSON(res, 200, { username: user.username });
+      return sendJSON(res, 200, { username: user.username, must_change: user.must_change });
     }
 
     if (route === 'POST /api/auth/password') {
       const user = requireAdmin(res, req); if (!user) return;
       const body = await readBody(req);
       const row = db.prepare('SELECT password_hash FROM admin_users WHERE id = ?').get(user.id);
-      if (!verifyPassword(String(body.current || ''), row.password_hash)) {
+      // In the forced first-login case the session was created seconds ago by presenting
+      // the current password, and nothing else is reachable, so it is not asked for again.
+      if (!user.must_change && !verifyPassword(String(body.current || ''), row.password_hash)) {
         return sendJSON(res, 400, { error: 'Current password is incorrect' });
       }
       const next = String(body.next || '');
       if (next.length < 10) return sendJSON(res, 400, { error: 'New password must be at least 10 characters' });
-      db.prepare('UPDATE admin_users SET password_hash = ? WHERE id = ?').run(hashPassword(next), user.id);
+      if (verifyPassword(next, row.password_hash)) return sendJSON(res, 400, { error: 'Choose a different password from the current one' });
+      db.prepare('UPDATE admin_users SET password_hash = ?, must_change = 0 WHERE id = ?').run(hashPassword(next), user.id);
       // Sign out every other session for this account.
       const sid = parseCookies(req).sid;
       db.prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?').run(user.id, sha256(sid));
@@ -1247,7 +1316,7 @@ const server = http.createServer(async (req, res) => {
       const st = getSettings();
       const q = (url.searchParams.get('q') || '').trim().slice(0, 60);
       const tenantId = Number(url.searchParams.get('tenant_id')) || null;
-      const base = { layout: st.kiosk_layout, mode: st.kiosk_mode };
+      const base = { layout: st.kiosk_layout, mode: st.kiosk_mode, theme: st.theme };
       if (!q && st.kiosk_mode !== 'browse') return sendJSON(res, 200, { ...base, tenants: [] });
       return sendJSON(res, 200, { ...base, tenants: buildDirectory(q, tenantId) });
     }
@@ -1268,6 +1337,13 @@ const server = http.createServer(async (req, res) => {
     // ---- Health ------------------------------------------------------------
     if (route === 'GET /api/health') {
       return sendJSON(res, 200, { ok: true, time: nowMs() });
+    }
+
+    // ---- Update check (admin-only, queries GitHub releases) ----------------
+    if (route === 'GET /api/admin/update-check') {
+      if (!requireAdmin(res, req)) return;
+      return checkForUpdate().then((info) => sendJSON(res, 200, info))
+        .catch((e) => sendJSON(res, 200, { update_available: false, error: e.message }));
     }
 
     // ---- Tenants -----------------------------------------------------------
@@ -1572,10 +1648,57 @@ const server = http.createServer(async (req, res) => {
     console.error(err);
     return sendJSON(res, 500, { error: 'Internal server error' });
   }
-});
+}
+
+// ---- TLS ---------------------------------------------------------------------
+let tlsState = null;
+
+function wantedNames() {
+  const ips = new Set(['127.0.0.1']);
+  const dns = new Set(['localhost']);
+  for (const a of netinfo.listAddresses()) if (a.family === 'IPv4') ips.add(a.address);
+  const add = (v) => { v = String(v || '').trim(); if (v) (/^\d+\.\d+\.\d+\.\d+$/.test(v) ? ips : dns).add(v); };
+  add(process.env.PREFERRED_ADDRESS);
+  String(process.env.EXTRA_ADDRESSES || '').split(/[,;\s]+/).forEach(add);
+  try { add(os.hostname()); } catch (_) { /* ignore */ }
+  return { ips: [...ips], dns: [...dns] };
+}
+
+function loadTls() {
+  if (TLS_CERT && TLS_KEY) {
+    return { cert: fs.readFileSync(TLS_CERT), key: fs.readFileSync(TLS_KEY) };
+  }
+  const { ips, dns } = wantedNames();
+  tlsState = tlscert.ensure({
+    dir: process.env.TLS_DIR ? path.resolve(process.env.TLS_DIR) : path.join(DATA_DIR, 'tls'),
+    ips, dns, legacyDir: process.env.TLS_LEGACY_CA_DIR || null,
+  });
+  return { cert: tlsState.cert, key: tlsState.key, reissued: tlsState.reissued };
+}
+
+let server;
+if (USES_TLS) {
+  const first = loadTls();
+  server = https.createServer({ cert: first.cert, key: first.key, minVersion: 'TLSv1.2' }, handleRequest);
+  server.on('tlsClientError', () => {}); // scanners / untrusted-CA aborts are routine; keep the log quiet
+  // Pick up a changed IP address or a renewed certificate without a restart.
+  const refresh = () => {
+    try {
+      const next = loadTls();
+      if (TLS_AUTO && !next.reissued) return;
+      server.setSecureContext({ cert: next.cert, key: next.key });
+      console.log('TLS certificate reloaded');
+    } catch (err) {
+      console.error('TLS reload failed: ' + err.message);
+    }
+  };
+  setInterval(refresh, TLS_AUTO ? 60 * 1000 : 6 * 60 * 60 * 1000).unref();
+} else {
+  server = http.createServer(handleRequest);
+}
 
 server.listen(PORT, HOST, () => {
-  console.log(`IN/OUT Board server listening on http://${HOST}:${PORT}`);
+  console.log(`IN/OUT Board server listening on ${USES_TLS ? 'https' : 'http'}://${HOST}:${PORT}`);
   console.log('Kiosk: /   Admin console: /admin');
   logAddresses();
 });
@@ -1587,7 +1710,7 @@ async function logAddresses() {
     const info = await netinfo.discover();
     const wildcard = HOST === '0.0.0.0' || HOST === '::';
     const shown = wildcard ? info.addresses : info.addresses.filter((a) => a.address === HOST);
-    const scheme = process.env.PUBLIC_SCHEME || 'http';
+    const scheme = process.env.PUBLIC_SCHEME || (USES_TLS ? 'https' : 'http');
     const port = process.env.PUBLIC_PORT || PORT;
     if (!shown.length) return;
     console.log(`Reachable at (${wildcard ? 'all interfaces' : HOST}):`);

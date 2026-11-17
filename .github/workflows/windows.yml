@@ -19,6 +19,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Validate scripts with Windows PowerShell 5.1
+        shell: powershell
+        run: ./test/windows-syntax.ps1
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -27,6 +30,7 @@ jobs:
 
   installer:
     runs-on: windows-latest
+    timeout-minutes: 20
     needs: test-windows
     env:
       VERSION: 1.0.${{ github.run_number }}
@@ -58,32 +62,70 @@ jobs:
         run: |
           $root = Join-Path $env:ProgramData 'InOutBoard'
           'tasks:'; Get-ScheduledTask -TaskName 'IN-OUT Board*' | Format-Table TaskName, State
-          if ((Get-ScheduledTask -TaskName 'IN-OUT Board*').Count -ne 3) { throw 'expected 3 scheduled tasks' }
+          if ((Get-ScheduledTask -TaskName 'IN-OUT Board*').Count -ne 2) { throw 'expected 2 scheduled tasks (board + nightly backup)' }
           if (-not (Get-NetFirewallRule -DisplayName 'IN/OUT Board HTTPS' -ErrorAction SilentlyContinue)) { throw 'firewall rule missing' }
           foreach ($f in 'inout-board.env','data\inout.sqlite','InOutBoard-Local-CA.crt') {
             if (-not (Test-Path (Join-Path $root $f))) { Get-ChildItem $root -Recurse | Select-Object FullName; Get-Content "$root\logs\*.log" -ErrorAction SilentlyContinue; throw "missing $f" }
           }
-          # internal port answers on loopback only
-          $h = Invoke-RestMethod http://127.0.0.1:3000/api/health
-          if (-not $h.ok) { throw 'internal health failed' }
-          # HTTPS front end answers on the loopback and on this runner's LAN address
+          # nothing but the board itself is installed: no separate proxy program, no private second port
+          if (Test-Path "$env:ProgramFiles\IN-OUT Board\caddy.exe") { throw 'caddy.exe should no longer ship' }
+          # HTTPS answers on the loopback and on this runner's LAN address
           $h = Invoke-RestMethod https://127.0.0.1:8443/api/health -SkipCertificateCheck
           if (-not $h.ok) { throw 'https health failed' }
           $lan = (& "$env:ProgramFiles\IN-OUT Board\node.exe" "$env:ProgramFiles\IN-OUT Board\scripts\netinfo.js" --plain) | Select-Object -First 1
           if ($lan) {
-            $h = Invoke-RestMethod "https://${lan}:8443/api/health" -SkipCertificateCheck
-            if (-not $h.ok) { throw "https health failed on $lan" }
-            "HTTPS OK on $lan"
+            $h = Invoke-RestMethod "https://${lan}:8443/api/health"
+            if (-not $h.ok) { throw "https health failed (trusted, no bypass) on $lan" }
+            "HTTPS OK and trusted on $lan"
           }
-          # the internal HTTP port must not be reachable on the LAN address
-          if ($lan) {
-            $open = $false
-            try { Invoke-WebRequest "http://${lan}:3000/api/health" -TimeoutSec 4 -UseBasicParsing | Out-Null; $open = $true } catch {}
-            if ($open) { throw "internal port 3000 is reachable on $lan" }
-          }
-          # the first-run password was logged exactly where the README says
-          if (-not (Select-String -Path "$root\logs\app.log" -Pattern 'Generated password' -Quiet)) { throw 'first-run password not in app.log' }
+          # port 3000 is no longer used
+          $old = $false
+          try { Invoke-WebRequest http://127.0.0.1:3000/api/health -TimeoutSec 3 -UseBasicParsing | Out-Null; $old = $true } catch {}
+          if ($old) { throw 'something still answers on the old internal port 3000' }
+          # HTTPS is TRUSTED on this PC (no certificate bypass): the installer added the CA to the machine store
+          $h = Invoke-RestMethod https://127.0.0.1:8443/api/health
+          if (-not $h.ok) { throw 'https health failed WITHOUT skipping certificate checks: CA not trusted' }
+          $h = Invoke-RestMethod https://localhost:8443/api/health
+          if (-not $h.ok) { throw 'https://localhost not trusted' }
+          $pkg = Get-Content "$env:ProgramFiles\IN-OUT Board\package.json" -Raw | ConvertFrom-Json
+          if ($pkg.version -ne $env:VERSION) { throw "installed version $($pkg.version) does not match $env:VERSION" }
+          $ca = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 "$root\InOutBoard-Local-CA.crt"
+          if (-not (Get-ChildItem Cert:\LocalMachine\Root | Where-Object Thumbprint -eq $ca.Thumbprint)) { throw 'CA not in LocalMachine Root store' }
+          # other devices can download the CA over HTTPS
+          $caFile = Join-Path $env:RUNNER_TEMP 'downloaded-ca.crt'
+          $dl = Invoke-WebRequest https://127.0.0.1:8443/ca.crt -UseBasicParsing -OutFile $caFile -PassThru
+          "ca.crt: HTTP $($dl.StatusCode), type $($dl.Headers['Content-Type']), $((Get-Item $caFile).Length) bytes"
+          $caText = Get-Content $caFile -Raw
+          if ($caText -notmatch 'BEGIN CERTIFICATE') { throw '/ca.crt did not return a certificate' }
+          # and it is the public certificate only, never the key
+          if ($caText -match 'PRIVATE KEY') { throw '/ca.crt leaked a private key' }
+          # the published copy is the CA file the app keeps
+          if ((Get-FileHash "$root\InOutBoard-Local-CA.crt").Hash -ne (Get-FileHash "$root\tls\ca.crt").Hash) { throw 'published CA differs from tls\ca.crt' }
+          # it is the same CA the PC trusts
+          $dlCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $caFile
+          if ($dlCert.Thumbprint -ne $ca.Thumbprint) { throw 'downloaded CA differs from the trusted CA' }
+          # firewall rule opens the TLS port by number on every profile
+          $rule = Get-NetFirewallRule -DisplayName 'IN/OUT Board HTTPS'
+          $pf = $rule | Get-NetFirewallPortFilter
+          if ($pf.LocalPort -ne '8443' -or $pf.Protocol -ne 'TCP' -or $rule.Profile -ne 'Any' -or $rule.Enabled -ne 'True') { throw "firewall rule wrong: $($rule.Profile) $($pf.LocalPort) $($rule.Enabled)" }
+          # first sign-in is admin/admin and forces a new password
+          $login = Invoke-RestMethod https://127.0.0.1:8443/api/auth/login -Method Post -ContentType 'application/json' -Body (@{ username='admin'; password='admin' } | ConvertTo-Json) -SessionVariable sess
+          if (-not $login.must_change) { throw 'admin/admin did not require a password change' }
+          try { Invoke-RestMethod https://127.0.0.1:8443/api/tenants -WebSession $sess | Out-Null; throw 'API reachable before password change' } catch { if ($_.Exception.Message -eq 'API reachable before password change') { throw } }
+          # Set a non-default password so repair/upgrade must preserve real credentials.
+          $password = 'installer-regression-password'
+          Invoke-RestMethod https://127.0.0.1:8443/api/auth/password -Method Post -ContentType 'application/json' -WebSession $sess -Body (@{ current='admin'; next=$password } | ConvertTo-Json)
           & "$env:ProgramFiles\IN-OUT Board\InOutBoard.ps1" -Action Status
+
+      - name: Repair preserves the admin password
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $msi = (Get-ChildItem dist/*.msi).FullName
+          $p = Start-Process msiexec.exe -ArgumentList "/fa `"$msi`" /qn /l*v `"$env:RUNNER_TEMP\repair.log`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\repair.log" -Tail 80; throw "repair exit $($p.ExitCode)" }
+          $login = Invoke-RestMethod https://127.0.0.1:8443/api/auth/login -Method Post -ContentType 'application/json' -Body (@{ username='admin'; password='installer-regression-password' } | ConvertTo-Json)
+          if ($login.must_change) { throw 'repair reset the existing password' }
 
       - name: Backup now
         shell: pwsh
@@ -105,10 +147,12 @@ jobs:
           if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\upgrade.log" -Tail 80; throw "upgrade exit $($p.ExitCode)" }
           if (-not (Select-String -Path "$root\inout-board.env" -Pattern 'survived-upgrade-marker' -Quiet)) { throw 'settings lost on upgrade' }
           if (-not (Test-Path "$root\data\inout.sqlite")) { throw 'database lost on upgrade' }
-          if ((Get-ScheduledTask -TaskName 'IN-OUT Board*').Count -ne 3) { throw 'tasks missing after upgrade' }
+          if ((Get-ScheduledTask -TaskName 'IN-OUT Board*').Count -ne 2) { throw 'tasks missing after upgrade' }
           Start-Sleep -Seconds 5
           $h = Invoke-RestMethod https://127.0.0.1:8443/api/health -SkipCertificateCheck
           if (-not $h.ok) { throw 'board not healthy after upgrade' }
+          $login = Invoke-RestMethod https://127.0.0.1:8443/api/auth/login -Method Post -ContentType 'application/json' -Body (@{ username='admin'; password='installer-regression-password' } | ConvertTo-Json)
+          if ($login.must_change) { throw 'upgrade reset the existing password' }
 
       - name: Uninstall keeps data, removes tasks and firewall rule
         shell: pwsh
@@ -120,6 +164,62 @@ jobs:
           if (Get-NetFirewallRule -DisplayName 'IN/OUT Board HTTPS' -ErrorAction SilentlyContinue) { throw 'firewall rule left behind' }
           if (Test-Path "$env:ProgramFiles\IN-OUT Board\server.js") { throw 'program files left behind' }
           if (-not (Test-Path "$env:ProgramData\InOutBoard\data\inout.sqlite")) { throw 'data was deleted' }
+          $ca = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 "$env:ProgramData\InOutBoard\InOutBoard-Local-CA.crt"
+          if (Get-ChildItem Cert:\LocalMachine\Root | Where-Object Thumbprint -eq $ca.Thumbprint) { throw 'CA still trusted after uninstall' }
+
+      - name: Upgrade from the Caddy-based layout keeps the same CA and the same port
+        shell: pwsh
+        run: |
+          # Recreate what an older install left behind: its CA under caddy\..., an env file with the proxy settings.
+          $root = Join-Path $env:ProgramData 'InOutBoard'
+          Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue
+          $legacy = Join-Path $root 'caddy\caddy\pki\authorities\local'
+          New-Item -ItemType Directory -Force $legacy, "$root\data" | Out-Null
+          & build/windows/stage/node.exe -e "const t=require('./scripts/tlscert'),fs=require('fs');const c=t.createCa('Caddy Local Authority - legacy');fs.writeFileSync(process.argv[1]+'/root.crt',c.certPem);fs.writeFileSync(process.argv[1]+'/root.key',c.keyPem)" $legacy
+          $oldCa = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 "$legacy\root.crt"
+          @"
+          HOST=127.0.0.1
+          PORT=3000
+          DATA_DIR=$root\data
+          TRUST_PROXY=1
+          COOKIE_SECURE=1
+          TLS_PORT=8443
+          PUBLIC_SCHEME=https
+          PUBLIC_PORT=8443
+          EXTRA_ADDRESSES=
+          PREFERRED_ADDRESS=
+          ADMIN_USER=admin
+          ADMIN_PASSWORD=
+          "@ -replace '(?m)^\s+', '' | Set-Content "$root\inout-board.env" -Encoding ASCII
+          $msi = (Get-ChildItem dist/*.msi).FullName
+          $p = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /l*v `"$env:RUNNER_TEMP\legacy.log`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\legacy.log" -Tail 80; throw "msiexec exit $($p.ExitCode)" }
+          Start-Sleep -Seconds 5
+          $envText = Get-Content "$root\inout-board.env" -Raw
+          foreach ($want in 'HTTPS=auto', 'PORT=8443', 'HOST=0.0.0.0') { if ($envText -notmatch "(?m)^$want\s*$") { throw "env not converted: missing $want`n$envText" } }
+          foreach ($gone in 'TRUST_PROXY', 'TLS_PORT', 'PUBLIC_SCHEME') { if ($envText -match "(?m)^$gone=") { throw "env still has $gone" } }
+          if (-not (Test-Path "$root\inout-board.env.before-https-builtin")) { throw 'no backup of the old settings' }
+          $h = Invoke-RestMethod https://127.0.0.1:8443/api/health
+          if (-not $h.ok) { throw 'not healthy / not trusted after conversion' }
+          $now = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 "$root\InOutBoard-Local-CA.crt"
+          if ($now.Thumbprint -ne $oldCa.Thumbprint) { throw 'CA changed: devices that trusted the old one would have to re-install' }
+          # the server certificate presented on the wire chains to that same old CA
+          $login = Invoke-RestMethod https://127.0.0.1:8443/api/auth/login -Method Post -ContentType 'application/json' -Body (@{ username='admin'; password='admin' } | ConvertTo-Json)
+          if (-not $login.must_change) { throw 'blank ADMIN_PASSWORD on a new database did not give admin/admin' }
+          if ((Get-ScheduledTask -TaskName 'IN-OUT Board*').Count -ne 2) { throw 'expected 2 tasks after conversion' }
+          if (Get-ScheduledTask -TaskName 'IN-OUT Board HTTPS' -ErrorAction SilentlyContinue) { throw 'old HTTPS task left behind' }
+          $p = Start-Process msiexec.exe -ArgumentList "/x `"$msi`" /qn" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "uninstall exit $($p.ExitCode)" }
+          Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue
+
+      - name: Size report
+        shell: pwsh
+        run: |
+          $rows = Get-ChildItem dist -File | ForEach-Object { '| {0} | {1:N1} MB |' -f $_.Name, ($_.Length / 1MB) }
+          $payload = (Get-ChildItem build/windows/stage -Recurse -File | Measure-Object Length -Sum).Sum
+          $md = @('### Installer sizes', '', '| File | Size |', '|---|---|') + $rows + @('', ('Installed program files (uncompressed): {0:N1} MB' -f ($payload / 1MB)), ('Bundled Node: {0:N1} MB' -f ((Get-Item build/windows/stage/node.exe).Length / 1MB)))
+          $md | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          $md
 
       - name: Setup EXE installs silently
         shell: pwsh
@@ -129,7 +229,27 @@ jobs:
           if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "setup exe exit $($p.ExitCode)" }
           $h = Invoke-RestMethod https://127.0.0.1:8443/api/health -SkipCertificateCheck
           if (-not $h.ok) { throw 'board not healthy after EXE install' }
-          & $exe /uninstall /quiet /norestart | Out-Null
+          $p = Start-Process $exe -ArgumentList '/uninstall /quiet /norestart' -Wait -PassThru
+          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "setup exe uninstall exit $($p.ExitCode)" }
+
+      - name: Explicit purge removes all data and supports a fresh reinstall
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:ProgramData 'InOutBoard'
+          $msi = (Get-ChildItem dist/*.msi).FullName
+          $p = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "purge fixture install exit $($p.ExitCode)" }
+          $p = Start-Process msiexec.exe -ArgumentList "/x `"$msi`" PURGEDATA=1 /qn /l*v `"$env:RUNNER_TEMP\purge.log`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\purge.log" -Tail 80; throw "purge exit $($p.ExitCode)" }
+          if (Test-Path $root) { throw 'purge left behind or recreated ProgramData' }
+          if (Get-ScheduledTask -TaskName 'IN-OUT Board*' -ErrorAction SilentlyContinue) { throw 'purge left tasks behind' }
+          if (Get-NetFirewallRule -DisplayName 'IN/OUT Board HTTPS' -ErrorAction SilentlyContinue) { throw 'purge left firewall rule behind' }
+          $p = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "fresh reinstall exit $($p.ExitCode)" }
+          $login = Invoke-RestMethod https://127.0.0.1:8443/api/auth/login -Method Post -ContentType 'application/json' -Body (@{ username='admin'; password='admin' } | ConvertTo-Json)
+          if (-not $login.must_change) { throw 'fresh reinstall did not require password change' }
+          $p = Start-Process msiexec.exe -ArgumentList "/x `"$msi`" PURGEDATA=1 /qn" -Wait -PassThru
+          if ($p.ExitCode -ne 0 -or (Test-Path $root)) { throw 'final purge failed' }
 
       - name: Collect installer logs
         if: always()
@@ -147,11 +267,23 @@ jobs:
           path: installer-logs
           if-no-files-found: ignore
 
-      - name: Upload installers
+      - name: Upload MSI
         uses: actions/upload-artifact@v4
         with:
-          name: InOutBoard-windows-${{ env.VERSION }}
-          path: dist/*
+          name: InOutBoard-msi-${{ env.VERSION }}
+          path: dist/*.msi
+
+      - name: Upload Setup EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: InOutBoard-setup-exe-${{ env.VERSION }}
+          path: dist/*.exe
+
+      - name: Upload checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: InOutBoard-checksums-${{ env.VERSION }}
+          path: dist/SHA256SUMS.txt
 
       - name: Attach to GitHub release (tags only)
         if: startsWith(github.ref, 'refs/tags/v')
