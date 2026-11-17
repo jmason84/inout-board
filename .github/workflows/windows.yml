@@ -157,6 +157,11 @@ jobs:
         run: |
           $root = Join-Path $env:ProgramData 'InOutBoard'
           $installDir = Join-Path $env:ProgramFiles 'IN-OUT Board'
+          # Exercise real GitHub redirects/downloads without executing the old release.
+          $fixtureZip = Join-Path $env:RUNNER_TEMP 'github-download-test.zip'
+          & "$installDir\node.exe" -e "require('./scripts/windows-update').download('https://github.com/jmason84/inout-board/releases/download/v1.0/inout-board-v1.0.zip',process.argv[1],1048576).catch(e=>{console.error(e.message);process.exitCode=1})" $fixtureZip
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub release download failed' }
+          Remove-Item $fixtureZip
           $parts = $env:VERSION.Split('.')
           $newVersion = '{0}.{1}.{2}' -f $parts[0], $parts[1], ([int]$parts[2] + 1)
           New-Item -ItemType Directory -Force update-test, "$root\updates" | Out-Null
@@ -182,7 +187,7 @@ jobs:
           if (-not (Invoke-RestMethod https://127.0.0.1:8443/api/health).ok) { throw 'failed verification interrupted the board' }
           $args = $args.Replace($wrong, $hash)
           $p = Start-Process $ps -ArgumentList $args -Wait -PassThru
-          if ($p.ExitCode -ne 0) { Get-Content "$root\updates\status.json"; Get-Content "$root\updates\installer.log" -Tail 100; throw 'update worker failed' }
+          if ($p.ExitCode -ne 0) { Get-Content "$root\updates\status.json"; Get-Content "$root\updates\installer.log" -Tail 100 -ErrorAction SilentlyContinue; throw 'update worker failed' }
           $status = Get-Content "$root\updates\status.json" -Raw | ConvertFrom-Json
           if ($status.state -ne 'complete') { throw 'update did not complete' }
           if ((Get-Content "$installDir\package.json" -Raw | ConvertFrom-Json).version -ne $newVersion) { throw 'installed version did not change' }

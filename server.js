@@ -1360,6 +1360,7 @@ async function handleRequest(req, res) {
       if (!requireAdmin(res, req)) return;
       try {
         const { completion, ...status } = await windowsUpdater.start();
+        completion.catch((err) => console.error('Update preparation failed: ' + err.message));
         return sendJSON(res, 202, status);
       } catch (err) { return sendJSON(res, err.status || 502, { error: err.message }); }
     }

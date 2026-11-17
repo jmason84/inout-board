@@ -8,6 +8,11 @@ param(
   [Parameter(Mandatory=$true)][string]$InstallDir
 )
 $ErrorActionPreference = 'Stop'
+# A worker launched by PowerShell 7 can inherit its module paths. Prefer the
+# modules belonging to this Windows PowerShell before importing legacy cmdlets.
+if ($PSVersionTable.PSVersion.Major -le 5) {
+  $env:PSModulePath = (Join-Path $PSHOME 'Modules') + [IO.Path]::PathSeparator + $env:PSModulePath
+}
 $updates = Join-Path $DataRoot 'updates'
 $statusPath = Join-Path $updates 'status.json'
 $pendingPath = Join-Path $updates 'pending.json'
