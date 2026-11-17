@@ -1,0 +1,18 @@
+[Unit]
+Description=IN/OUT Board nightly backup
+
+[Service]
+Type=oneshot
+User=inout
+Group=inout
+WorkingDirectory=/opt/inout-board
+Environment=DATA_DIR=/var/lib/inout-board
+Environment=KEEP=14
+EnvironmentFile=-/etc/inout-board.env
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning scripts/backup.js /var/backups/inout-board
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/inout-board /var/backups/inout-board

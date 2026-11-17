@@ -1,11 +1,21 @@
 # IN/OUT Board - docker compose
 #
-#   cp .env.example .env     # then edit ADMIN_USER / ADMIN_PASSWORD
-#   docker compose up -d
+#   cp .env.example .env     # optional: set EXTRA_ADDRESSES to this server's LAN IP
+#   docker compose up -d     # https://<server-ip>:8443  (admin / admin, you must change it at first sign-in)
+#
+# Defaults match the Windows installer: built-in HTTPS on 8443 (private CA, served at /ca.crt),
+# admin/admin with a forced password change, and a nightly backup at 02:15 (keeps 14).
 #
 # Optional Cloudflare Tunnel (no open ports needed):
-#   set TUNNEL_TOKEN in .env, then:  docker compose --profile tunnel up -d
-#   (point the tunnel's public hostname at  http://app:3000 )
+#   set TUNNEL_TOKEN, HTTPS=off, COOKIE_SECURE=1 and TRUST_PROXY=1 in .env, then:
+#   docker compose --profile tunnel up -d
+#   (point the tunnel's public hostname at  http://app:8443 )
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
 
 services:
   app:
@@ -15,12 +25,36 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      PORT: "3000"
+      PORT: "8443"
+      HTTPS: ${HTTPS:-auto}
       DATA_DIR: /data
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
     ports:
-      - "${HOST_PORT:-3000}:3000"
+      - "${HOST_PORT:-8443}:8443"
     volumes:
       - inout-data:/data
+    logging: *logging
+
+  # Nightly backup of the database and photos into /data/backups (same volume).
+  backup:
+    image: ghcr.io/jmason84/inout-board:deploy
+    build: .
+    container_name: inout-board-backup
+    restart: unless-stopped
+    command: ["node", "scripts/backup-schedule.js"]
+    environment:
+      DATA_DIR: /data
+      BACKUP_TIME: ${BACKUP_TIME:-02:15}
+      KEEP: ${BACKUP_KEEP:-14}
+      TZ: ${TZ:-UTC}
+    healthcheck:
+      disable: true
+    volumes:
+      - inout-data:/data
+    depends_on:
+      - app
+    logging: *logging
 
   cloudflared:
     profiles: ["tunnel"]
@@ -32,6 +66,7 @@ services:
       TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
     depends_on:
       - app
+    logging: *logging
 
 volumes:
   inout-data:

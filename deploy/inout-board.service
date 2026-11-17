@@ -1,14 +1,19 @@
 [Unit]
 Description=IN/OUT Board
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=inout
 Group=inout
 WorkingDirectory=/opt/inout-board
-EnvironmentFile=/etc/inout-board.env
+# Defaults (match the Windows installer): built-in HTTPS on 8443. Anything in the
+# env file below overrides these, because later assignments win.
+Environment=PORT=8443
+Environment=HTTPS=auto
 Environment=DATA_DIR=/var/lib/inout-board
+EnvironmentFile=-/etc/inout-board.env
 ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning server.js
 Restart=always
 RestartSec=3

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased (linux-parity, builds on codex/windows-features) - issue #6
+- **Docker defaults match Windows:** built-in HTTPS (`HTTPS=auto`) on port 8443, `admin` / `admin` with a forced password change, `EXTRA_ADDRESSES` for the certificate, Docker json-file log rotation (10 MB x 5).
+- **Nightly backup in Docker:** new `backup` Compose service (`scripts/backup-schedule.js`, 02:15, keeps 14, `BACKUP_TIME` / `BACKUP_KEEP` / `TZ`).
+- **HTTPS health check:** `scripts/healthcheck.js` replaces the plain-HTTP container probe.
+- **`deploy/install.sh`:** one-step systemd installer (Node 22.5+, `inout` user, `/opt/inout-board`, HTTPS=auto on 8443, admin/admin, backup timer, ufw/firewalld, admin reset on reinstall over leftover data, upgrade with pre-backup).
+- **`deploy/upgrade.sh`:** Docker upgrade that backs up, pulls, rebuilds and waits for healthy.
+- systemd: service defaults to HTTPS on 8443, new `inout-board-backup.service` / `.timer`.
+- README and DEPLOY.md rewritten for the new Linux defaults, certificate trust steps and a platform comparison table.
+
 ## Unreleased (codex/windows-features)
 - Fix Windows PowerShell 5.1 parsing of a UTF-8 em dash that prevented MSI installation; validate script decoding before building.
 - Preserve explicit System theme choices, apply changing admin defaults without pinning browsers, and keep the Pages demo compatible.

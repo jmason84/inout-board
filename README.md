@@ -81,10 +81,21 @@ Pick your platform. Every option is one Node.js process plus one folder of data 
 | You have | Easiest way | Port | Protocol | Full steps |
 |----------|-------------|------|----------|------------|
 | **Windows** PC or server | MSI or Setup EXE installer | **8443** | **HTTPS** (built-in) | [Deploying on Windows](#deploying-on-windows) |
-| **Linux** server or VM | Docker Compose | 3000 | HTTP (HTTPS optional) | [Deploying on Linux](#deploying-on-linux) |
+| **Linux** server or VM | Docker Compose, or one-step `install.sh` (systemd) | **8443** | **HTTPS** (built-in) | [Deploying on Linux](#deploying-on-linux) |
 | Just want to try it | `node server.js` on any OS (Node.js 22.5+) | 3000 | HTTP | below |
 
-> **Platform comparison.** The Windows installer is a one-click experience: HTTPS on port 8443, `admin` / `admin` login with forced change, nightly backups and firewall all configured automatically. Linux Docker currently requires a few manual steps and defaults to plain HTTP on port 3000. Improving the Linux experience is tracked in [issue #6](https://github.com/jmason84/inout-board/issues/6) — the code already supports `HTTPS=auto` on Linux, it just is not the Docker default yet.
+> **Platform comparison.** Both platforms give the same result out of the box:
+
+| | Windows (MSI/EXE) | Linux (Docker Compose) | Linux (`install.sh`, systemd) |
+|---|---|---|---|
+| Install | Double-click | `docker compose up -d` | `sudo ./deploy/install.sh` |
+| HTTPS / port | Built-in, 8443 | Built-in, 8443 | Built-in, 8443 |
+| First login | `admin` / `admin`, forced change | same | same |
+| Nightly backup | 02:15, keeps 14 | `backup` service, 02:15, keeps 14 | systemd timer, 02:15, keeps 14 |
+| Auto-start | Service at boot | `restart: unless-stopped` | systemd enabled |
+| Firewall | Rule added | Open the port yourself | ufw / firewalld port opened if active |
+| Upgrade | Run the new installer | `deploy/upgrade.sh` | Re-run `install.sh` |
+| Log rotation | Log files | json-file, 10 MB x 5 | journald |
 
 ```bash
 git clone https://github.com/jmason84/inout-board.git
@@ -166,7 +177,7 @@ Rules:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PORT` | `3000` (`8443` on Windows) | HTTP port (or HTTPS port when `HTTPS=auto`) |
+| `PORT` | `3000` (`8443` for Docker, `install.sh` and Windows) | HTTP port (or HTTPS port when `HTTPS=auto`) |
 | `HOST` | `0.0.0.0` | Bind address |
 | `DATA_DIR` | `./data` | Where the SQLite file and uploaded pictures live |
 | `ADMIN_USER` | `admin` | Username of the first admin (only used when no admins exist) |
@@ -267,48 +278,38 @@ More detail, troubleshooting and the security checklist are in **[DEPLOY.md](DEP
 
 ### Deploying on Linux
 
-**Option 1: Docker Compose (recommended).** Needs Docker with the Compose plugin. Defaults to **plain HTTP on port 3000**.
+Both options give you the Windows experience: HTTPS on port **8443** with the board's own private CA, `admin` / `admin` with a forced password change, and a nightly backup (02:15, keeps 14).
+
+**Option 1: Docker Compose (recommended).** Needs Docker with the Compose plugin.
 
 ```bash
 git clone https://github.com/jmason84/inout-board.git
 cd inout-board
-cp .env.example .env          # set ADMIN_USER and a strong ADMIN_PASSWORD
-docker compose up -d          # http://<server-ip>:3000  and  /admin
+cp .env.example .env          # optional, but set EXTRA_ADDRESSES to the server's LAN IP
+docker compose up -d          # https://<server-ip>:8443  and  /admin
 ```
 
-- Data lives in the `inout-board_inout-data` Docker volume and survives restarts and upgrades.
-- Update: back up, then `git pull && docker compose up -d --build`.
-- **Built-in HTTPS (like the Windows installer):** add `HTTPS=auto` and `PORT=8443` to `.env`, change `HOST_PORT=8443`, and set `COOKIE_SECURE=1`. The board creates its own private CA; other devices install it once from `https://<server-ip>:8443/ca.crt` (see the Windows section for per-device instructions).
-- Free HTTPS without opening ports: `docker compose --profile tunnel up -d` with a Cloudflare Tunnel token (set `TUNNEL_TOKEN`, `COOKIE_SECURE=1`, `TRUST_PROXY=1` in `.env`).
+- Sign in as `admin` / `admin`; you must choose a new password (10+ characters) before anything else works. Do this straight away, before anyone else can reach the board. To skip the default, set `ADMIN_PASSWORD` in `.env` before the first start.
+- Inside Docker the app cannot see the server's LAN address, so put it in `EXTRA_ADDRESSES` (for example `192.168.1.50,board.office.lan`) so the certificate matches. Without it the certificate covers only the container.
+- Data lives in the `inout-board_inout-data` Docker volume and survives restarts and upgrades. The `backup` service writes nightly backups to `/data/backups` in the same volume (`BACKUP_TIME`, `BACKUP_KEEP`, `TZ` in `.env`); copy them off the server too.
+- Update: `./deploy/upgrade.sh` backs up, pulls, rebuilds and waits until the health check passes.
+- Logs are rotated by Docker (10 MB x 5 files per service).
+- Behind a tunnel or reverse proxy instead: set `HTTPS=off`, `COOKIE_SECURE=1`, `TRUST_PROXY=1` and point the proxy at `http://app:8443`. Free HTTPS without opening ports: `docker compose --profile tunnel up -d` with a Cloudflare Tunnel token (`TUNNEL_TOKEN`).
 - Prebuilt image: pushing the `deploy` branch or a `v*` tag publishes `ghcr.io/jmason84/inout-board` (`.github/workflows/docker.yml`).
 
-**Option 2: Node.js and systemd** (Node.js 22.5 or newer). Defaults to **plain HTTP on port 3000**; see the HTTPS note below to match the Windows experience.
+**Option 2: one-step install on a bare-metal server or VM** (systemd; Node.js 22.5+ is installed for you if missing).
 
 ```bash
-sudo useradd --system --home /opt/inout-board --shell /usr/sbin/nologin inout
-sudo mkdir -p /opt/inout-board /var/lib/inout-board
-sudo cp -r server.js package.json public assets scripts /opt/inout-board/
-sudo chown -R inout:inout /var/lib/inout-board
-
-sudo tee /etc/inout-board.env >/dev/null <<'EOF'
-PORT=3000
-ADMIN_USER=admin
-ADMIN_PASSWORD=change-this-long-passphrase
-# For built-in HTTPS (same as the Windows installer), uncomment:
-# HTTPS=auto
-# PORT=8443
-# COOKIE_SECURE=1
-EOF
-sudo chmod 600 /etc/inout-board.env
-
-sudo cp deploy/inout-board.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now inout-board
-journalctl -u inout-board -f
+git clone https://github.com/jmason84/inout-board.git
+cd inout-board
+sudo ./deploy/install.sh                  # options: --port N  --addresses 192.168.1.50  --no-firewall  --reset-admin
 ```
 
-**HTTPS on Linux:** either set `HTTPS=auto` in the env file (the board creates its own private CA and certificate, the same way the Windows installer does; devices install `https://<host>:<port>/ca.crt` once — see the Windows section for per-device steps) or put Caddy or nginx in front and set `TRUST_PROXY=1` and `COOKIE_SECURE=1`. A ready Caddy config with automatic certificates is in [`deploy/Caddyfile.example`](deploy/Caddyfile.example).
+It creates the `inout` user, installs to `/opt/inout-board`, writes `/etc/inout-board.env` (`HTTPS=auto`, `PORT=8443`, `admin` / `admin` with forced change), enables the service and a nightly backup timer (`/var/backups/inout-board`), opens the port in ufw or firewalld when one is active, and prints the HTTPS URLs. Re-run it from a newer checkout to upgrade: it backs up first and keeps your data and settings. A reinstall over leftover data resets the admin to `admin` / `admin` again, like the Windows installer.
 
-**Nightly backup (cron):** `15 2 * * *  cd /opt/inout-board && DATA_DIR=/var/lib/inout-board node scripts/backup.js /var/backups/inout-board` (keeps 14; copy them off the machine too).
+**Trusting the certificate.** Other devices download the private CA once from `https://<server-ip>:8443/ca.crt` (the browser warns once, that is expected) and install it. The per-device steps (Windows, macOS, iPhone/iPad, Android, Firefox) are in the Windows section below. On a Linux desktop, copy it to `/usr/local/share/ca-certificates/inout-board.crt` and run `sudo update-ca-certificates` (Debian/Ubuntu) or `sudo trust anchor inout-board.crt` (Fedora). Chrome and Firefox on Linux keep their own list: import it under *Settings, Privacy and security, Manage certificates, Authorities*.
+
+Prefer your own domain and a public certificate? Set `TLS_CERT` and `TLS_KEY`, or put Caddy or nginx in front (`HTTPS=off`, `TRUST_PROXY=1`, `COOKIE_SECURE=1`); a ready config is in [`deploy/Caddyfile.example`](deploy/Caddyfile.example).
 
 ### Deploying on Windows
 

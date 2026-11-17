@@ -1,0 +1,9 @@
+[Unit]
+Description=Nightly IN/OUT Board backup (02:15, keeps 14)
+
+[Timer]
+OnCalendar=*-*-* 02:15:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
