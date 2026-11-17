@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (linux-parity, builds on codex/windows-features) - issue #6
+## Unreleased (linux-parity, builds on codex/windows-features) - issue #6 (UNTESTED on a real Linux server)
 - **Docker defaults match Windows:** built-in HTTPS (`HTTPS=auto`) on port 8443, `admin` / `admin` with a forced password change, host networking so the certificate covers the server's real addresses automatically (`EXTRA_ADDRESSES` only for names it cannot see), Docker json-file log rotation (10 MB x 5).
 - **Nightly backup in Docker:** new `backup` Compose service (`scripts/backup-schedule.js`, 02:15, keeps 14, `BACKUP_TIME` / `BACKUP_KEEP` / `TZ`).
 - **HTTPS health check:** `scripts/healthcheck.js` replaces the plain-HTTP container probe.

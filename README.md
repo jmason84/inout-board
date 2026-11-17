@@ -278,6 +278,8 @@ More detail, troubleshooting and the security checklist are in **[DEPLOY.md](DEP
 
 ### Deploying on Linux
 
+> **Untested:** the Linux deployment (Docker Compose and `deploy/install.sh`) has not yet been tested on a real Linux server. Only the app's automated tests, a stubbed run of `install.sh` and a Compose file validation have been done; the Docker image, host networking, the backup service, `upgrade.sh`, the systemd units and certificate trust from other devices are unverified. Try it on a test machine first and report problems.
+
 Both options give you the Windows experience: HTTPS on port **8443** with the board's own private CA, `admin` / `admin` with a forced password change, and a nightly backup (02:15, keeps 14).
 
 **Option 1: Docker Compose (recommended).** Needs Docker with the Compose plugin.

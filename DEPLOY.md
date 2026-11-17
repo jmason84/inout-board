@@ -10,6 +10,8 @@ Pick one of the ways below. **Option A (Docker)** and **Option C (`install.sh`)*
 
 ## Option A: Docker (recommended)
 
+> **Untested:** the Linux deployment (Docker Compose and `deploy/install.sh`) has not yet been tested on a real Linux server. Only the app's automated tests, a stubbed run of `install.sh` and a Compose file validation have been done; the Docker image, host networking, the backup service, `upgrade.sh`, the systemd units and certificate trust from other devices are unverified. Try Docker and Option C on a test machine first and report problems.
+
 Needs Docker with the Compose plugin.
 
 ```bash
@@ -83,6 +85,8 @@ Data is stored in `./data` (override with `DATA_DIR=/some/folder`).
 ---
 
 ## Option C: Linux one-step installer (systemd)
+
+> **Untested:** `install.sh` has not been run on a real systemd server yet (see the note under Option A).
 
 ```bash
 git clone -b deploy https://github.com/jmason84/inout-board.git
