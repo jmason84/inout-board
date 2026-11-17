@@ -33,14 +33,18 @@ if ($Version -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') { throw "Version must look lik
 Remove-Item $Work -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Stage, $Dl, $Dist | Out-Null
 
-function Get-Verified([string]$Url, [string]$ExpectedSha256, [string]$OutFile) {
+function Get-Verified([string]$Url, [string]$ExpectedHash, [string]$OutFile) {
   Write-Host "Downloading $Url"
   Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing
-  $actual = (Get-FileHash -Algorithm SHA256 -Path $OutFile).Hash.ToLowerInvariant()
-  if ($actual -ne $ExpectedSha256.ToLowerInvariant()) {
-    throw "Checksum mismatch for $Url`n expected $ExpectedSha256`n actual   $actual"
+  # The publisher's checksum file decides the algorithm: 64 hex = SHA-256 (Node), 128 = SHA-512 (Caddy).
+  $alg = switch ($ExpectedHash.Length) { 64 { 'SHA256' } 128 { 'SHA512' } default { throw "Unexpected checksum length for $Url" } }
+  $actual = (Get-FileHash -Algorithm $alg -Path $OutFile).Hash.ToLowerInvariant()
+  if ($actual -ne $ExpectedHash.ToLowerInvariant()) {
+    throw "Checksum mismatch for $Url`
+ expected $ExpectedHash`
+ actual   $actual"
   }
-  Write-Host "  sha256 ok ($actual)"
+  Write-Host "  $alg ok ($actual)"
 }
 
 # ---- Node.js 22 (latest 22.x, which has built-in SQLite) -------------------
